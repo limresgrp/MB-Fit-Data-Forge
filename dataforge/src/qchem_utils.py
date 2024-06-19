@@ -76,7 +76,7 @@ def prepare_qchem_min_input(
     
     processed_nmer_names = set()
     
-    for filename in glob.glob(os.path.join(qchem_in_root, "**/**/*.inp"), recursive=False):
+    for filename in glob.glob(os.path.join(qchem_in_root, "**/**/*.inp"), recursive=True):
         nmer_name = basename(dirname(filename))
         if nmer_name in processed_nmer_names:
             continue

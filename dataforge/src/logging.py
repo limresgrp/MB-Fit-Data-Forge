@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 
 def get_logger(log_filename: Optional[str] = None) -> logging.Logger:
-    logFormatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s")
+    logFormatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-7.7s]  %(message)s")
     rootLogger = logging.getLogger("dataforge")
     if rootLogger.hasHandlers():
         rootLogger.handlers.clear()

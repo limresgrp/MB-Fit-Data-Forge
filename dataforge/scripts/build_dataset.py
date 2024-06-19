@@ -1,5 +1,6 @@
 
 import os
+from pathlib import Path
 import shutil
 import logging
 import json
@@ -68,7 +69,7 @@ def build_dataset(
         nmers_capped_root=NMERS_CAPPED_ROOT,
         qchem_out_root=QCHEM_OUT_ROOT,
         fit_poly_root=FIT_POLY_ROOT,
-        dataset_root=FIT_DATASET_ROOT,
+        dataset_root=DATASET_ROOT,
         delta_energies_dict=delta_energies_dict,
         logger=logger,
     )
@@ -137,15 +138,23 @@ def build_energy_dict(
             nmer_energy_csv = os.path.join(nmer_folder, DataDict.ENERGY_FILENAME)
             if os.path.isfile(nmer_energy_csv):
                 nmer_df = pd.read_csv(nmer_energy_csv)
-                # Append nmer_df to the list of all nmer DataFrames
-                nmer = len(nmer_idcs)
-                energy_dict_implement_value: List[pd.DataFrame] = energy_dict_implement.get(nmer, [])
-                energy_dict_implement_value.append(nmer_df)
-                energy_dict_implement[nmer] = energy_dict_implement_value
-                # Flag nmer_df as loaded for this folder
-                nmer_df_loaded = True
-                logger.info(f"-- {nmer_energy_csv.replace(qchem_out_root, '')} energy file loaded. It contains {len(nmer_df)} entries.")
-            else:
+                num_nmer_files = len(glob.glob(os.path.join(nmer_folder, "*.out")))
+                if len(nmer_df) == num_nmer_files:    
+                    # Append nmer_df to the list of all nmer DataFrames
+                    nmer = len(nmer_idcs)
+                    energy_dict_implement_value: List[pd.DataFrame] = energy_dict_implement.get(nmer, [])
+                    energy_dict_implement_value.append(nmer_df)
+                    energy_dict_implement[nmer] = energy_dict_implement_value
+                    # Flag nmer_df as loaded for this folder
+                    nmer_df_loaded = True
+                    logger.info(f"-- {nmer_energy_csv.replace(qchem_out_root, '')} energy file loaded. It contains {len(nmer_df)} entries.")
+                else:
+                    logger.warn(
+                        f"-- {nmer_energy_csv.replace(qchem_out_root, '')} energy file exists, " +
+                        f"but number of entries does not match the output files in the folder ({len(nmer_df)} | {num_nmer_files}). " +
+                         "Rebuilding. --"
+                    )
+            if not nmer_df_loaded:
                 logger.info(f"-- Building {nmer_energy_csv.replace(qchem_out_root, '')} energy file...")
             last_nmer_folder = nmer_folder
 
@@ -181,7 +190,7 @@ def build_energy_dict(
 
             last_nmer = len(nmer_idcs) # 1 for monomers, 2 for dimers, ...
         except Exception:
-            logger.error(f"Error while parsing file {filename}. Check if the file is corrupted or if the computation is not yet finished.")
+            logger.error(f"-- Failed parsing file {filename}. Check if the file is corrupted or if the computation is not yet finished --")
     
     if nmer_df is not None and not nmer_df_loaded:
         last_nmer_energy_csv = write_nmer_df_and_update_energy_dict_implement(
@@ -502,7 +511,8 @@ def build_raw_dataset(
                             os.makedirs(nmer_poly_folder)
                         
                         # Read poly_generator python code template
-                        with open("poly_generator_template.py", 'r') as src:
+                        current_dir = Path(__file__).parent
+                        with open(current_dir.parent / 'templates' / 'poly_generator_template.py', 'r') as src:
                             code = src.read()
 
                         # Build symmetry names one line at a time
@@ -520,8 +530,11 @@ def build_raw_dataset(
                         for add_atom_line in add_atom_lines:
                             add_atoms_code += f'add_atom{[str(elem) for elem in add_atom_line]}\n'
 
+                        code=code.replace('[FOLDER]', nmer_name)
                         code=code.replace('[NAME]', get_name_from_symmetry_names(symmetry_names[symmetry_names_argsort]))
                         code=code.replace('[ADD_ATOMS]', add_atoms_code)
+                        code=code.replace('[MONOMER_INDICES]', '[[],]')
+                        code=code.replace('[NMER_INDICES]', get_nmer_indices(len(monomers)))
                         with open(poly_generator_filename, 'w') as trg:
                             trg.write(code)
                         logger.info(f"--- Polynomial generator for {nmer_name} saved! ---")
@@ -581,6 +594,15 @@ def get_name_from_symmetry_names(symmetry_names: np.ndarray):
 def get_symmetry_names_argsort_filename(dname, fname):
     return os.path.join(dname, f"{basename(fname).split('-')[1].split('.')[0]}.index")
 
+def get_nmer_indices(k: int):
+    result = []
+    for i in range(1, k+1):
+        result.extend(combinations(range(k), i))
+    return str([
+        x for x in [list(comb) for comb in result]
+        if all(x[j] == x[j - 1] + 1 for j in range(1, len(x)))
+    ])
+
 def find_directories_with_name(root_folder, directory_name):
     matching_directories = []
     for root, dirs, files in os.walk(root_folder):
@@ -626,9 +648,7 @@ def build_fitting_dataset(
                 else:
                     logger.info(f"--- Writing file {out_filename.replace(dataset_root,  '')} ---")
                 
-                out_filenames.append(out_filename)
                 save_opt_struct = True
-
                 for filename in glob.glob(os.path.join(nmer_dir, "*.xyz"), recursive=False):        
                     xyz_file = read(filename)
                     info = f"{xyz_file.info['nmer_energy']} {xyz_file.info['binding_energy']}"
@@ -641,6 +661,7 @@ def build_fitting_dataset(
                     )
                     if save_opt_struct:
                         save_optimized_structure(filename, dataset_root, qchem_min_out_root, nmers_capped_root, fit_optimized_root, fit_poly_root)
+                        out_filenames.append(out_filename)
                         save_opt_struct = False
             
             for out_filename in out_filenames:
