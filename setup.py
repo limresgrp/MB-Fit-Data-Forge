@@ -19,6 +19,8 @@ setup(
     entry_points={
         # make the scripts available as command line scripts
         "console_scripts": [
+            "dataforge-parse-traj = dataforge.scripts.parse_traj:main",
+            "dataforge-build-nmers = dataforge.scripts.build_nmers:main",
             "dataforge-qchem = dataforge.scripts.qchem:main",
         ]
     },
