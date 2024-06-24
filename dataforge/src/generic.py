@@ -48,3 +48,11 @@ def parse_slice(slice_str: str):
     step = None if len(parts) == 2 or parts[2] == '' else int(parts[2])
 
     return slice(start, stop, step)
+
+def get_package_root(module_file_path: str):
+    # Traverse upwards to the top-level package
+    module_root_folder = os.path.dirname(module_file_path)
+    while os.path.isfile(os.path.join(module_root_folder, '__init__.py')):
+        module_root_folder = os.path.dirname(module_root_folder)
+
+    return module_root_folder
