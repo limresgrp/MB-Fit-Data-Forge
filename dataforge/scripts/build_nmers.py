@@ -1,3 +1,4 @@
+import argparse
 from logging import Logger
 import os
 import glob
@@ -17,10 +18,56 @@ from ase import Atoms
 from ase.io import read, write
 
 
+def main(args=None):
+    args = parse_command_line(args)
+
+    build_nmers(
+        input_filename          = args.input,
+        dataset_root            = args.root,
+        nmer_n_samples          = args.samples,
+        keep_only_monomer_names = args.keep,
+    )
+
+def parse_command_line(args=None):
+    parser = argparse.ArgumentParser(
+        description="""
+        Read one or more trajectory files, filter and group the molecule of interest
+        and savs the information as a npz dataset file.
+    """
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        help="The `.npz` file saved in the previous step.",
+        required=True,
+    )
+    parser.add_argument(
+        "-r",
+        "--root",
+        help="Root folder for all the dataset components that will be created.",
+        required=True,
+    )
+    parser.add_argument(
+        "-s",
+        "--samples",
+        nargs='+',
+        help="Ordered list of integers, indicating respectively the number of monomers, dimers and trimers to sample",
+        required=True,
+    )
+    parser.add_argument(
+        "-k",
+        "--keep",
+        nargs='+',
+        help="Optional list with the monomer names to keep. All other monomers will be ignored.",
+        default=None,
+    )
+    
+    return parser.parse_args(args=args)
+
 def build_nmers(
     input_filename: str,
     dataset_root: str,
-    nmer_n_samples: Dict[int, int],
+    nmer_n_samples: Union[List[int], Dict[int, int]],
     keep_only_monomer_names: Optional[List[str]] = None,
 ):
     logger = get_logger('02_build_nmers.log')
@@ -30,6 +77,9 @@ def build_nmers(
     NMERS_CAPPED_ROOT =  join(DATA_ROOT,    "xyz_capped"     )
     QCHEM_IN_ROOT =      join(DATA_ROOT,    "qchem_input"    )
     QCHEM_MIN_IN_ROOT =  join(DATA_ROOT,    "qchem_min_input")
+
+    if isinstance(nmer_n_samples, list):
+        nmer_n_samples = {k: int(v) for k, v in zip(range(1, len(nmer_n_samples) + 1), nmer_n_samples)}
     
     logger.info("- Building nmers...")
     build_xyz_nmers(
@@ -443,3 +493,7 @@ def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str):
             format="extxyz",
             append=False,
         )
+
+
+if __name__ == "__main__":
+    main()

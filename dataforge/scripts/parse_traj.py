@@ -1,3 +1,4 @@
+import argparse
 import os
 import numpy as np
 import MDAnalysis as mda
@@ -7,6 +8,65 @@ from typing import Dict, List, Optional
 from pathlib import Path
 from dataforge.src import parse_slice
 from dataforge.src.logging import get_logger
+
+
+def main(args=None):
+    args = parse_command_line(args)
+
+    parse_trajectory(
+        input_filename  = args.input,
+        traj_filenames  = args.traj,
+        selection       = args.selection,
+        trajslice       = args.trajslice,
+        output_filename = args.output,
+    )
+
+def parse_command_line(args=None):
+    parser = argparse.ArgumentParser(
+        description="""
+        Read one or more trajectory files, filter and group the molecule of interest
+        and savs the information as a npz dataset file.
+    """
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        help="Filename of the reference structure+topology. It should be a `.tpr` file.",
+        required=True,
+    )
+    parser.add_argument(
+        "-t",
+        "--traj",
+        nargs='+',
+        help="List of filenames, containing all the trajectory files to load. They could be either `.trr` or `.xtc` files.",
+        required=True,
+    )
+    parser.add_argument(
+        "-s",
+        "--selection",
+        help="Selection string to filter the atoms of the molecule of interest. Defaults to 'all'",
+        default='all',
+    )
+    parser.add_argument(
+        "-ts",
+        "--trajslice",
+        help="""Optional variable to filter the frames of the trajectory to keep.
+        It could be either `None` (by default, keep all frames) or a string in the form `[start]:[stop]:[step]`.
+        E.g. `:1000:2` filters the first 1000 frames, striding with a step of 2 and yielding a total of 500 frames.""",
+        default=None,
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="""It is the filename of the output `.npz` dataset.
+        It could be either a `.npz` file or a folder.
+        If a folder is specified, the dataset will be saved in that folder,
+        using the `INPUT_FILENAME` stem as a filename and the `.npz` suffix.
+        If not specified, the dataset will be names as the `INPUT_FILENAME` but with the `.npz` suffix.""",
+        default=None,
+    )
+    
+    return parser.parse_args(args=args)
 
 def parse_trajectory(
     input_filename: str,
@@ -32,7 +92,7 @@ def parse_trajectory(
 
     u_monomers, count = np.unique(dataset['monomer_names'], return_counts=True)
     unique_monomers_formatted = ' | '.join([f"{c}x {m}" for m, c in zip(u_monomers, count)])
-    logger.info(f"- The system contains following monomers: {unique_monomers_formatted}")
+    logger.info(f"- The system contains the following monomers: {unique_monomers_formatted}")
     
     # --- Save parsed trajectory as a .npz dataset --- #
     if output_filename is None:
@@ -146,3 +206,7 @@ def add_descriptor_indices(descriptor: str, dataset: dict, atom_orig_index: np.n
     dataset[f'{descriptor}_orig_indices'] = orig_indices
     dataset[f'{descriptor}_indices'] = indices
     return dataset
+
+
+if __name__ == "__main__":
+    main()
