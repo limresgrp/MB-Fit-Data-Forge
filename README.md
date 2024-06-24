@@ -62,7 +62,7 @@ To run qchem, follow these steps:
 
 Optionally, you can run the qchem calculation on a subfolder only, e.g. with the following script:
 
-`nohup dataforge-qchem -i DATASET_ROOT/data/qchem_input/trimers/dimers/monomers/C-CCHO/ -o DATASET_ROOT/data/qchem_output/trimers/dimers/monomers/C-CCHO/ &`
+`nohup dataforge-qchem -i DATASET_ROOT/data/qchem_input/trimers/dimers/monomers/C-CCHO/ &`
 
 Note that you can run multiple instances of the script, they will run in parallel and distribute workload.
 
