@@ -11,16 +11,17 @@ from os.path import dirname
 from pathlib import Path
 
 '''
-# Procedure to perform single point energy evaluation #
+# Procedure to perform single point energy evaluation and structure minimization #
 
 source /apps/qchem6/.qcsetup
-nohup python qchem.py -i /storage_common/angiod/MB-Fit/POPC/data/qchem_input/ -o /storage_common/angiod/MB-Fit/POPC/data/qchem_output/ &
-nohup python qchem.py -i /storage_common/angiod/MB-Fit/POPC/data/qchem_min_input/ -o /storage_common/angiod/MB-Fit/POPC/data/qchem_min_output/ &
+nohup dataforge-qchem -i [DATASET_ROOT]/data/qchem_input/ &
+nohup dataforge-qchem -i [DATASET_ROOT]/data/qchem_min_input/ &
 '''
 
 
 def run_background(input: str, output: str):
-    print(os.path.join(input, "**/*.inp"))
+    print(f"Input path: {os.path.join(input, "**/*.inp")}")
+    print(f"Output path: {output}")
     for filename in glob.glob(os.path.join(input, "**/*.inp"), recursive=True):
         # If output file was already computed before, skip.
         out_filename = filename.replace(input, output).replace(".inp", ".out")
@@ -57,19 +58,23 @@ def main(args=None):
         "--input",
         help="Path to the qchem_input directory.",
         type=Path,
-        default=None,
+        required=True,
     )
     parser.add_argument(
         "-o",
         "--output",
-        help="Path to the qchem_output directory.",
+        help="Path to the qchem_output directory. Provide only if you know what you are doing.",
         type=Path,
         default=None,
     )
 
     args = parser.parse_args(args=args)
+    _input = args.input
+    _output = args.output
+    if _output is None:
+        _output = str(_input).replace("qchem_input", "qchem_output")
 
-    bg_thread = threading.Thread(target=run_background, args=(str(args.input), str(args.output),))
+    bg_thread = threading.Thread(target=run_background, args=(str(_input), str(_output),))
     bg_thread.start()
 
 if __name__ == "__main__":
