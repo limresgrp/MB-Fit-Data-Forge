@@ -56,9 +56,9 @@ To run qchem, follow these steps:
 
 1. Load the qchem module: `source /path/to/qchem/.qcsetup`
 2. Run the QChem single point evaluation on all nmers:
-   `nohup dataforge-qchem -i DATASET_ROOT/data/qchem_input/ -o DATASET_ROOT/data/qchem_output/ &`
+   `nohup dataforge-qchem -i DATASET_ROOT/data/qchem_input/ &`
 3. Run the QChem energy minimization on each type of nmer:
-   `nohup dataforge-qchem -i DATASET_ROOT/data/qchem_min_input/ -o DATASET_ROOT/data/qchem_min_output/ &`
+   `nohup dataforge-qchem -i DATASET_ROOT/data/qchem_min_input/ &`
 
 Optionally, you can run the qchem calculation on a subfolder only, e.g. with the following script:
 
