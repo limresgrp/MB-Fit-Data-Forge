@@ -1,4 +1,5 @@
 
+import argparse
 import os
 from pathlib import Path
 import shutil
@@ -15,7 +16,7 @@ from os.path import join, dirname, basename
 from typing import Dict, List, Optional
 from ase.io import read, write
 from itertools import islice, combinations
-from dataforge.src import DataDict, fix_bonds
+from dataforge.src import DataDict, fix_bonds, apply_replacements_fp
 from dataforge.src.logging import get_logger
 
 
@@ -23,19 +24,20 @@ def build_dataset(
     dataset_root: str,
     nmer_folder: Optional[str] = None,
     rule_if_file_exists: int = DataDict.SKIP,
+    **kwargs,
 ):
     logger = get_logger('03_build_dataset.log')
 
-    DATA_ROOT          = join(dataset_root, "data"            )
-    NMERS_CAPPED_ROOT  = join(DATA_ROOT   , "xyz_capped"      )
-    QCHEM_OUT_ROOT     = join(DATA_ROOT   , "qchem_output"    )
-    QCHEM_MIN_OUT_ROOT = join(DATA_ROOT   , "qchem_min_output")
-    DATASET_ROOT       = join(DATA_ROOT   , "dataset"         )
+    DATA_ROOT          =                                             join(dataset_root, "data"         )
+    NMERS_CAPPED_ROOT  = kwargs.get('NMERS_CAPPED_ROOT' ,   None) or join(DATA_ROOT, "xyz_capped"      )
+    QCHEM_OUT_ROOT     = kwargs.get('QCHEM_OUT_ROOT'    ,   None) or join(DATA_ROOT, "qchem_output"    )
+    QCHEM_MIN_OUT_ROOT = kwargs.get('QCHEM_MIN_OUT_ROOT',   None) or join(DATA_ROOT, "qchem_min_output")
+    DATASET_ROOT       = kwargs.get('DATASET_ROOT'      ,   None) or join(DATA_ROOT, "dataset"         )
 
-    FIT_ROOT           = join(dataset_root, "fitting"         )
-    FIT_DATASET_ROOT   = join(FIT_ROOT    , "dataset"         )
-    FIT_OPTIM_ROOT     = join(FIT_ROOT    , "optimized"       )
-    FIT_POLY_ROOT      = join(FIT_ROOT    , "poly"            )
+    FIT_ROOT           =                                             join(dataset_root, "fitting"      )
+    FIT_DATASET_ROOT   = kwargs.get('FIT_DATASET_ROOT',     None) or join(FIT_ROOT , "dataset"         )
+    FIT_OPTIM_ROOT     = kwargs.get('FIT_OPTIM_ROOT'  ,     None) or join(FIT_ROOT , "optimized"       )
+    FIT_POLY_ROOT      = kwargs.get('FIT_POLY_ROOT'   ,     None) or join(FIT_ROOT , "poly"            )
 
     logger.info("- Reading/bulding energy.csv files of nmers...")
     energy_dict = build_energy_dict(
@@ -71,6 +73,7 @@ def build_dataset(
         fit_poly_root=FIT_POLY_ROOT,
         dataset_root=DATASET_ROOT,
         delta_energies_dict=delta_energies_dict,
+        rule_if_file_exists=rule_if_file_exists,
         logger=logger,
     )
     logger.info("- Completed building data/dataset! -")
@@ -149,9 +152,12 @@ def build_energy_dict(
                     nmer_df_loaded = True
                     logger.info(f"-- {nmer_energy_csv.replace(qchem_out_root, '')} energy file loaded. It contains {len(nmer_df)} entries.")
                 else:
-                    logger.warn(
+                    len_df = len(nmer_df)
+                    os.remove(nmer_energy_csv)
+                    nmer_df = None
+                    logger.warning(
                         f"-- {nmer_energy_csv.replace(qchem_out_root, '')} energy file exists, " +
-                        f"but number of entries does not match the output files in the folder ({len(nmer_df)} | {num_nmer_files}). " +
+                        f"but number of entries does not match the output files in the folder ({len_df} | {num_nmer_files}). " +
                          "Rebuilding. --"
                     )
             if not nmer_df_loaded:
@@ -220,9 +226,6 @@ def write_nmer_df_and_update_energy_dict_implement(
         energy_dict_implement_value.append(nmer_df)
         energy_dict_implement[last_nmer] = energy_dict_implement_value
         return last_nmer_energy_csv
-
-def hartrees2kcalmol(energy: float):
-    return energy * 627.5096080305927
 
 def build_delta_energies_dict(
     qchem_out_root: str,
@@ -345,6 +348,7 @@ def build_raw_dataset(
     dataset_root: str,
     delta_energies_dict: dict,
     logger: logging.Logger,
+    rule_if_file_exists: int = DataDict.SKIP,
 ):
     all_energies_contrib_dict = {}
     with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), 'r') as topology_f:
@@ -363,21 +367,25 @@ def build_raw_dataset(
             for nmer_capping_folder in glob.glob(nmer_capping_folder_regex, recursive=True):
 
                 nmer_poly_folder = nmer_capping_folder.replace(nmers_capped_root, fit_poly_root)
-                poly_generator_filename = os.path.join(nmer_poly_folder, "poly_generator.py")
+                poly_generator_filename = apply_replacements_fp(os.path.join(nmer_poly_folder, "poly_generator.py"))
 
                 nmer_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, dataset_root)
                 nmer_energy_contrib_csv = os.path.join(nmer_dataset_folder, DataDict.ENERGY_FILENAME)
+
                 if os.path.isfile(nmer_energy_contrib_csv):
-                    # read nmer_energy_contrib_df and append it to the
-                    # list of all nmer energy contribution DataFrames
-                    nmer_energy_contrib_df = pd.read_csv(nmer_energy_contrib_csv)
-                    # concat nmer_energy_contrib_df to nmer_energy_contrib_df_total
-                    nmer_energy_contrib_df_total = update_nmer_df(
-                        nmer_energy_contrib_df_total,
-                        nmer_energy_contrib_df
-                    )
-                    all_energies_contrib_dict[nmer_name] = nmer_energy_contrib_df_total
-                    continue
+                    if rule_if_file_exists is DataDict.SKIP:
+                        # read nmer_energy_contrib_df and append it to the
+                        # list of all nmer energy contribution DataFrames
+                        nmer_energy_contrib_df = pd.read_csv(nmer_energy_contrib_csv)
+                        # concat nmer_energy_contrib_df to nmer_energy_contrib_df_total
+                        nmer_energy_contrib_df_total = update_nmer_df(
+                            nmer_energy_contrib_df_total,
+                            nmer_energy_contrib_df
+                        )
+                        all_energies_contrib_dict[nmer_name] = nmer_energy_contrib_df_total
+                        continue
+                    if rule_if_file_exists not in [DataDict.APPEND, DataDict.OVERWRITE]:
+                        raise ValueError()
 
                 # ------------- Iterate xyz_capped files inside nmer folder ------------------------ #
                 logger.info(f"--- Building  dataset for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
@@ -387,7 +395,7 @@ def build_raw_dataset(
                 # Check if qchem output folder exists, to avoid an empty search in the nmer_df
                 qchem_out_folder = nmer_capping_folder.replace(nmers_capped_root, qchem_out_root)
                 if not os.path.isdir(qchem_out_folder):
-                    logger.warn(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
+                    logger.warning(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
                     continue
                 for nmer_capping_filename in glob.glob(nmer_capping_files_regex, recursive=True):
                     frame_str, monomers_str = basename(nmer_capping_filename).split('.')[0].split('-')
@@ -415,10 +423,10 @@ def build_raw_dataset(
                             topology=topology,
                         )
                     except KeyError as e:
-                        logger.warn(f"--- Missing energy contribution for nmer {str(e)}. Check if you are missing qchem output files ---")
+                        logger.warwarningn(f"--- Missing energy contribution for nmer {str(e)}. Check if you are missing qchem output files ---")
                         break
                     except LookupError as e:
-                        logger.warn(f"--- {str(e)} ---")
+                        logger.warning(f"--- {str(e)} ---")
                         break
                     nmer_energy_contrib_df_row = pd.DataFrame(
                         [{
@@ -448,96 +456,18 @@ def build_raw_dataset(
                     # Reorder atoms in capped xyz to have atoms of the same type grouped
                     # (same element and same connected atoms)
                     if os.path.isfile(symmetry_names_argsort_filename) and os.path.isfile(poly_generator_filename):
-                        logger.info(f"--- Loading symmetry names file {symmetry_names_argsort_filename} ---")
+                        logger.debug(f"--- Loading symmetry names file {symmetry_names_argsort_filename} ---")
                         symmetry_names_argsort = np.loadtxt(symmetry_names_argsort_filename, dtype=int)
                     else:
-                        logger.info(f"--- Symmetry names file {symmetry_names_argsort_filename} and/or poly generator file {poly_generator_filename} are missing. Computing... ---")
-                        metadata = atoms.info
-
-                        symbols = np.array([atom.symbol for atom in atoms])
-                        atom_index_keys: List[str] = [key for key in metadata.keys() if 'idcs' in key and 'bonded' not in key]
-                        
-                        atom_name_to_symmetry_name = {}
-                        atom_identities = []
-                        atom_identities_general = []
-                        atom_bonded_index_keys = []
-                        atom_bonded_idcs_list = []
-                        for atom in atoms:
-                            for atom_index_key in atom_index_keys:
-                                metadata_atom_index_key = np.asarray(metadata[atom_index_key]).reshape(-1,)
-                                if atom.index in metadata_atom_index_key:
-                                    atom_bonded_index_key_fragments = atom_index_key.split('_')
-                                    atom_bonded_index_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_bonded_' + atom_bonded_index_key_fragments[-1]
-                                    monomer_name_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_name'
-                                    atom_bonded_index_argwhere = np.argwhere(metadata_atom_index_key == atom.index).item()
-                                    break
-                            atom_bonded_idcs = metadata[atom_bonded_index_key][atom_bonded_index_argwhere]
-                            atom_bonded_idcs = atom_bonded_idcs[atom_bonded_idcs != -1]
-                            atom_bonded_idcs_list.append(atom_bonded_idcs)
-                            if isinstance(metadata[monomer_name_key], List):
-                                monomer_name = metadata[monomer_name_key][atom_bonded_index_argwhere]
-                            else:
-                                monomer_name = metadata[monomer_name_key]
-                            assert isinstance(monomer_name, str)
-                            atom_identity = monomer_name + '|' + atom.symbol + '-' + ''.join(np.sort(symbols[atom_bonded_idcs]))
-                            atom_identity_general = monomer_name + '|' + atom.symbol + '-' + str(len(atom_bonded_idcs))
-                            atom_identities.append(atom_identity)
-                            atom_identities_general.append(atom_identity_general)
-                            atom_bonded_index_keys.append(atom_bonded_index_key)
-
-                        atom_identities = np.array(atom_identities)
-                        atom_identities_general = np.array(atom_identities_general)
-                        sort_idcs = np.argsort(atom_identities_general)
-                        atom_identities_sorted = atom_identities[sort_idcs]
-                        atom_identities_general_sorted = atom_identities_general[sort_idcs]
-
-                        for atom_identity_sorted, atom_identity_general_sorted in zip(atom_identities_sorted, atom_identities_general_sorted):
-                            if atom_identity_sorted not in atom_name_to_symmetry_name:
-                                antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT.get(atom_identity_sorted, None)
-                                if antosn is None:
-                                    antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT_GENERAL.get(atom_identity_general_sorted)
-                                atom_name_to_symmetry_name[atom_identity_sorted] = antosn
-
-                        symmetry_names = np.array([
-                            atom_name_to_symmetry_name.get(an) + ('G' if 'severed' in abik else '')
-                            for an, abik in zip(atom_identities, atom_bonded_index_keys)
-                        ])
-                        symmetry_names_argsort = np.argsort(symmetry_names)
-                        np.savetxt(symmetry_names_argsort_filename, symmetry_names_argsort, fmt="%i", delimiter=',')
-
-                        # Create folder for code generating polynomials
-                        if not os.path.exists(nmer_poly_folder):
-                            logger.info(f"--- Writing polynomial generator for {nmer_name} ---")
-                            os.makedirs(nmer_poly_folder)
-                        
-                        # Read poly_generator python code template
-                        current_dir = Path(__file__).parent
-                        with open(current_dir.parent / 'templates' / 'poly_generator_template.py', 'r') as src:
-                            code = src.read()
-
-                        # Build symmetry names one line at a time
-                        add_atom_lines = []
-                        for symmetry_name, atom, sna in zip(
-                            symmetry_names[symmetry_names_argsort],
-                            atoms[symmetry_names_argsort],
-                            symmetry_names_argsort
-                        ):
-                            add_atom_line = [symmetry_name]
-                            add_atom_line.extend(argofyinx(symmetry_names_argsort, atom_bonded_idcs_list[sna]).tolist())
-                            add_atom_lines.append(add_atom_line)
-                        
-                        add_atoms_code = """"""
-                        for add_atom_line in add_atom_lines:
-                            add_atoms_code += f'add_atom{[str(elem) for elem in add_atom_line]}\n'
-
-                        code=code.replace('[FOLDER]', nmer_name)
-                        code=code.replace('[NAME]', get_name_from_symmetry_names(symmetry_names[symmetry_names_argsort]))
-                        code=code.replace('[ADD_ATOMS]', add_atoms_code)
-                        code=code.replace('[MONOMER_INDICES]', '[[],]')
-                        code=code.replace('[NMER_INDICES]', get_nmer_indices(len(monomers)))
-                        with open(poly_generator_filename, 'w') as trg:
-                            trg.write(code)
-                        logger.info(f"--- Polynomial generator for {nmer_name} saved! ---")
+                        symmetry_names_argsort = compute_symmetry_names_and_poly_generator(
+                            symmetry_names_argsort_filename,
+                            poly_generator_filename,
+                            atoms,
+                            nmer_poly_folder,
+                            nmer_name,
+                            monomers,
+                            logger,
+                        )
                     
                     atoms.info = {
                         key: val for key, val in zip(["total_energy", "nmer_energy", "binding_energy"], value)
@@ -551,7 +481,7 @@ def build_raw_dataset(
                 
                 # save nmer_energy_contrib_df to csv
                 if nmer_energy_contrib_df is None:
-                    logger.warn(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
+                    logger.warning(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
                 else:
                     nmer_energy_contrib_df.to_csv(nmer_energy_contrib_csv, index=False)
 
@@ -574,6 +504,128 @@ def build_raw_dataset(
     #     sort_keys=True,
     #     indent=4,
     # )
+
+def compute_symmetry_names_and_poly_generator(
+    symmetry_names_argsort_filename,
+    poly_generator_filename,
+    atoms,
+    nmer_poly_folder,
+    nmer_name,
+    monomers,
+    logger,
+):
+    logger.info(f"--- Symmetry names file {symmetry_names_argsort_filename} and/or poly generator file {poly_generator_filename} are missing. Computing... ---")
+    metadata = atoms.info
+
+    symbols = np.array([atom.symbol for atom in atoms])
+    atom_index_keys: List[str] = [key for key in metadata.keys() if 'idcs' in key and 'bonded' not in key]
+    
+    atom_name_to_symmetry_name = {}
+    atom_identities = []
+    atom_identities_general = []
+    atom_bonded_index_keys = []
+    atom_bonded_idcs_list = []
+    for atom in atoms:
+        for atom_index_key in atom_index_keys:
+            metadata_atom_index_key = np.asarray(metadata[atom_index_key]).reshape(-1,)
+            if atom.index in metadata_atom_index_key:
+                atom_bonded_index_key_fragments = atom_index_key.split('_')
+                atom_bonded_index_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_bonded_' + atom_bonded_index_key_fragments[-1]
+                monomer_name_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_name'
+                atom_bonded_index_argwhere = np.argwhere(metadata_atom_index_key == atom.index).item()
+                break
+        atom_bonded_idcs = metadata[atom_bonded_index_key][atom_bonded_index_argwhere]
+        atom_bonded_idcs = atom_bonded_idcs[atom_bonded_idcs != -1]
+        atom_bonded_idcs_list.append(atom_bonded_idcs)
+        if isinstance(metadata[monomer_name_key], List):
+            monomer_name = metadata[monomer_name_key][atom_bonded_index_argwhere]
+        else:
+            monomer_name = metadata[monomer_name_key]
+        assert isinstance(monomer_name, str)
+        atom_identity = monomer_name + '|' + atom.symbol + '-' + ''.join(np.sort(symbols[atom_bonded_idcs]))
+        atom_identity_general = monomer_name + '|' + atom.symbol + '-' + str(len(atom_bonded_idcs))
+        atom_identities.append(atom_identity)
+        atom_identities_general.append(atom_identity_general)
+        atom_bonded_index_keys.append(atom_bonded_index_key)
+
+    atom_identities = np.array(atom_identities)
+    atom_identities_general = np.array(atom_identities_general)
+    sort_idcs = np.argsort(atom_identities_general)
+    atom_identities_sorted = atom_identities[sort_idcs]
+    atom_identities_general_sorted = atom_identities_general[sort_idcs]
+
+    for atom_identity_sorted, atom_identity_general_sorted in zip(atom_identities_sorted, atom_identities_general_sorted):
+        if atom_identity_sorted not in atom_name_to_symmetry_name:
+            antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT.get(atom_identity_sorted, None)
+            if antosn is None:
+                antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT_GENERAL.get(atom_identity_general_sorted)
+            atom_name_to_symmetry_name[atom_identity_sorted] = antosn
+
+    symmetry_names = np.array([
+        atom_name_to_symmetry_name.get(an) + ('G' if 'severed' in abik else '')
+        for an, abik in zip(atom_identities, atom_bonded_index_keys)
+    ])
+    symmetry_names_argsort = np.argsort(symmetry_names)
+    np.savetxt(symmetry_names_argsort_filename, symmetry_names_argsort, fmt="%i", delimiter=',')
+
+    save_poly_generator(
+        nmer_poly_folder,
+        nmer_name,
+        symmetry_names,
+        symmetry_names_argsort,
+        atoms,
+        atom_bonded_idcs_list,
+        monomers,
+        poly_generator_filename,
+        logger,
+    )
+
+    return symmetry_names_argsort
+
+def save_poly_generator(
+    nmer_poly_folder,
+    nmer_name,
+    symmetry_names,
+    symmetry_names_argsort,
+    atoms,
+    atom_bonded_idcs_list,
+    monomers,
+    poly_generator_filename,
+    logger,
+):
+    # Create folder for code generating polynomials
+    if not os.path.exists(nmer_poly_folder):
+        logger.info(f"--- Writing polynomial generator for {nmer_name} ---")
+        os.makedirs(nmer_poly_folder)
+    
+    # Read poly_generator python code template
+    current_dir = Path(__file__).parent
+    with open(current_dir.parent / 'templates' / 'poly_generator_template.py', 'r') as src:
+        code = src.read()
+
+    # Build symmetry names one line at a time
+    add_atom_lines = []
+    for symmetry_name, atom, sna in zip(
+        symmetry_names[symmetry_names_argsort],
+        atoms[symmetry_names_argsort],
+        symmetry_names_argsort
+    ):
+        add_atom_line = [symmetry_name]
+        add_atom_line.extend(argofyinx(symmetry_names_argsort, atom_bonded_idcs_list[sna]).tolist())
+        add_atom_lines.append(add_atom_line)
+    
+    add_atoms_code = """"""
+    for add_atom_line in add_atom_lines:
+        add_atoms_code += f'add_atom{[str(elem) for elem in add_atom_line]}\n'
+
+    code=code.replace('[FOLDER]', nmer_name)
+    code=code.replace('[NAME]', get_name_from_symmetry_names(symmetry_names[symmetry_names_argsort]))
+    code=code.replace('[ADD_ATOMS]', add_atoms_code)
+    code=code.replace('[MONOMER_INDICES]', '[[],]')
+    code=code.replace('[NMER_INDICES]', get_nmer_indices(len(monomers)))
+    with open(poly_generator_filename, 'w') as trg:
+        trg.write(code)
+    logger.info(f"--- Polynomial generator for {nmer_name} saved! ---")
 
 def update_nmer_df(
     base_df: Optional[pd.DataFrame],
@@ -670,6 +722,24 @@ def build_fitting_dataset(
                     fit_poly_folder=dirname(out_filename).replace(fit_dataset_root, fit_poly_root)
                 )
                 fix_bonds(out_filename)
+                convert_unit(out_filename, hartrees2kcalmol)
+
+def hartrees2kcalmol(energy: float):
+    return energy * 627.5096080305927
+
+def convert_unit(filename: str, func):
+    out_filename = filename.replace('nmers', 'nmers.kcal')
+    print(f"{out_filename} saved!")
+    with open(out_filename, 'w') as f_out:
+        with open(filename, 'r') as f_in:
+            for line in f_in.readlines():
+                line_splits = line.split()
+                if len(line_splits) == 2:
+                    nmer_energy, binding_energy = line_splits
+                    nmer_energy = func(float(nmer_energy))
+                    binding_energy = func(float(binding_energy))
+                    line = ' '.join([str(nmer_energy), str(binding_energy)]) + '\n'
+                f_out.writelines(line)
 
 def save_optimized_structure(
         filename: str,
@@ -681,6 +751,7 @@ def save_optimized_structure(
     ):
     xyz_file = read(filename)
     out_filename = os.path.join(dirname(filename.replace(dataset_root, fit_optimized_root)), "nmers.opt")
+    out_filename = apply_replacements_fp(out_filename)
     os.makedirs(dirname(out_filename), exist_ok=True)
     
     qchem_output_file = glob.glob(f"{qchem_min_out_root}/**/{basename(dirname(filename))}/*.out", recursive=True)[0]
@@ -723,7 +794,7 @@ def save_optimized_structure(
     append_connection_info_to_xyz_file(xyz_filename=out_filename, fit_poly_folder=dirname(out_filename).replace(fit_optimized_root, fit_poly_root))
 
 def append_connection_info_to_xyz_file(xyz_filename: str, fit_poly_folder: str):
-    fit_poly_filename = os.path.join(fit_poly_folder, "poly_generator.py")
+    fit_poly_filename = apply_replacements_fp(os.path.join(fit_poly_folder, "poly_generator.py"))
 
     pattern = re.compile(r"'(.*?)'")
     connections_list = []
@@ -780,6 +851,49 @@ def build_all_energies_contrib_dict(
                     )
                     all_energies_contrib_dict[nmer_name] = nmer_energy_contrib_df_total
                 else:
-                    logger.warn(f"-- Missing nmer energy contribution csv file {nmer_energy_contrib_csv.replace(nmers_capped_root, '')} --")
+                    logger.warning(f"-- Missing nmer energy contribution csv file {nmer_energy_contrib_csv.replace(nmers_capped_root, '')} --")
     logger.info("- Dictionary completed! -")
     return all_energies_contrib_dict
+
+
+if __name__ == "__main__":
+    # Create the argument parser
+    parser = argparse.ArgumentParser(description="Run the build_dataset method with user-specified inputs.")
+
+    # Required argument
+    parser.add_argument('dataset_root', type=str, help="The root directory of the dataset")
+
+    # Optional arguments
+    parser.add_argument('--nmer_folder', type=str, help="The nmer folder, optional", default=None)
+    parser.add_argument('--rule_if_file_exists', type=int, help="Rule for handling existing files (default is 0)", default=0)
+    
+    # Optional kwargs
+    parser.add_argument('--NMERS_CAPPED_ROOT', type=str, help="Optional path for NMERS_CAPPED_ROOT", default=None)
+    parser.add_argument('--QCHEM_OUT_ROOT', type=str, help="Optional path for QCHEM_OUT_ROOT", default=None)
+    parser.add_argument('--QCHEM_MIN_OUT_ROOT', type=str, help="Optional path for QCHEM_MIN_OUT_ROOT", default=None)
+    parser.add_argument('--DATASET_ROOT', type=str, help="Optional path for DATASET_ROOT", default=None)
+    parser.add_argument('--FIT_DATASET_ROOT', type=str, help="Optional path for FIT_DATASET_ROOT", default=None)
+    parser.add_argument('--FIT_OPTIM_ROOT', type=str, help="Optional path for FIT_OPTIM_ROOT", default=None)
+    parser.add_argument('--FIT_POLY_ROOT', type=str, help="Optional path for FIT_POLY_ROOT", default=None)
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # Prepare kwargs from optional arguments
+    kwargs = {
+        'NMERS_CAPPED_ROOT': args.NMERS_CAPPED_ROOT,
+        'QCHEM_OUT_ROOT': args.QCHEM_OUT_ROOT,
+        'QCHEM_MIN_OUT_ROOT': args.QCHEM_MIN_OUT_ROOT,
+        'DATASET_ROOT': args.DATASET_ROOT,
+        'FIT_DATASET_ROOT': args.FIT_DATASET_ROOT,
+        'FIT_OPTIM_ROOT': args.FIT_OPTIM_ROOT,
+        'FIT_POLY_ROOT': args.FIT_POLY_ROOT
+    }
+
+    # Call the function with parsed arguments
+    build_dataset(
+        dataset_root=args.dataset_root,
+        nmer_folder=args.nmer_folder,
+        rule_if_file_exists=args.rule_if_file_exists,
+        **{k: v for k, v in kwargs.items() if v is not None}
+    )

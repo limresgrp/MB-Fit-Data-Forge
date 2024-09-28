@@ -32,6 +32,7 @@ def run_background(input: str, output: str):
         if not os.path.exists(out_folder):
             os.makedirs(out_folder)
 
+        open(out_filename, 'a').close() # Create empty file to avoid other processes to process this same input
         print(f"qchem -nt 1 '{filename}' '{out_filename}'")
         subprocess.run([f"qchem -nt 1 '{filename}' '{out_filename}'"], shell=True, stdin=None, stdout=None, stderr=None, close_fds=True)
 

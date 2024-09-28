@@ -1,6 +1,7 @@
 import os
-from typing import Callable, List
 import numpy as np
+from functools import reduce
+from typing import Callable, List
 
 def append_suffix_to_filename(filename, suffix):
     base_name, extension = os.path.splitext(filename)
@@ -56,3 +57,27 @@ def get_package_root(module_file_path: str):
         module_root_folder = os.path.dirname(module_root_folder)
 
     return module_root_folder
+
+FOLDER_REPLACEMENTS = [
+    (os.path.join("trimers", "dimers"), "dimers"),
+    (os.path.join("dimers", "monomers"), "monomers")
+]
+
+def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: int = 1):
+    """
+    Apply replacement operations using a functional programming approach.
+    
+    Parameters:
+    - input_string (str): The original string.
+    - replacements (list of tuples): A list of (old_word, new_word) tuples.
+    - n (int): Number of times to apply the replacements.
+    
+    Returns:
+    - str: The modified string after applying the replacements.
+    """
+    # Define a single pass of applying all replacements
+    def apply_once(s):
+        return reduce(lambda acc, pair: acc.replace(*pair), replacements, s)
+    
+    # Apply the pass n times using reduce over the string
+    return reduce(lambda acc, _: apply_once(acc), range(n), input_string)

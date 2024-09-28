@@ -9,6 +9,7 @@ from .generic import (
     union_rows_2d,
     intersect_rows_2d,
     parse_slice,
+    apply_replacements_fp,
 )
 from .fix import fix_bonds
 
@@ -22,4 +23,5 @@ __all__ = [
     intersect_rows_2d,
     parse_slice,
     fix_bonds,
+    apply_replacements_fp,
 ]
