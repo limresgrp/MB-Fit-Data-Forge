@@ -656,11 +656,14 @@ def get_nmer_indices(k: int):
     ])
 
 def find_directories_with_name(root_folder, directory_name):
-    matching_directories = []
-    for root, dirs, files in os.walk(root_folder):
-        if directory_name in dirs:
-            matching_directories.append(os.path.join(root, directory_name))
-    return matching_directories
+
+    def fast_scandir(dirname):
+        subfolders= [f.path for f in os.scandir(dirname) if f.is_dir()]
+        for dirname in list(subfolders):
+            subfolders.extend(fast_scandir(dirname))
+        return subfolders
+    
+    return [dir for dir in fast_scandir(root_folder) if dir.endswith(directory_name)]
 
 def build_fitting_dataset(
     dataset_root: str,
