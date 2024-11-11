@@ -1,5 +1,6 @@
 import argparse
 from logging import Logger
+import logging
 import os
 import glob
 import json
@@ -70,7 +71,7 @@ def build_nmers(
     nmer_n_samples: Union[List[int], Dict[int, int]],
     keep_only_monomer_names: Optional[List[str]] = None,
 ):
-    logger = get_logger('02_build_nmers.log')
+    logger = get_logger('02_build_nmers.log', level=logging.DEBUG)
     
     DATA_ROOT =          join(dataset_root, "data"           )
     NMERS_ROOT =         join(DATA_ROOT,    "xyz"            )
@@ -383,6 +384,30 @@ def build_multimer_recursively(
     if n not in nmer_n_samples:
         return
     
+    def parse_nmer_n_samples(x):
+        if isinstance(x, int):
+            return x, 'US'
+        if isinstance(x, tuple):
+            assert len(x) == 2
+            assert isinstance(x[0], int)
+            assert isinstance(x[1], str)
+            return x
+        if isinstance(x, dict):
+            assert 'n' in x
+            n = x['n']
+            assert isinstance(n, int)
+            if 'method' in x:
+                method = x['method']
+            else:
+                method = 'US'
+            assert isinstance(x['method'], str)
+            return n, method
+        raise Exception(f"Element of dict 'nmer_n_samples' with key {n} invalid. " +
+                        "Should be either int, tuple of (int, str) or dict(n=n_samples(int), method=method_name(str))." +
+                        "Got {type(x)}")
+
+    n_samples, method = parse_nmer_n_samples(nmer_n_samples[n])
+    
     multimers: List[Multimer] = []
     multimers_occurrence = {}
     multimers_first_occurrence = {}
@@ -391,7 +416,7 @@ def build_multimer_recursively(
             continue
 
         # - Create Multimer to join descriptors distributions of Monomers - #
-        multimer = Multimer(monomers_tuple, orig_all_atom_types)
+        multimer = Multimer(monomers_tuple, orig_all_atom_types, logger=logger)
         multimer.compute_descriptors()
         multimers.append(multimer)
         
@@ -404,13 +429,13 @@ def build_multimer_recursively(
 
         # - Sample uniformly over multimer descriptors values - #
         if recursive_multimer_sampled_indices is None:
-            n_samples = nmer_n_samples[n] // multimers_occurrence.get(multimer.name)
+            multimer_n_samples = n_samples // multimers_occurrence.get(multimer.name)
             
             # - Adjust number of samples in first occurrence of multimer to sample the exact total number of samples that was specified - #
             if multimers_first_occurrence.get(multimer.name):
-                n_samples += nmer_n_samples[n] % multimers_occurrence.get(multimer.name)
+                multimer_n_samples += n_samples % multimers_occurrence.get(multimer.name)
                 multimers_first_occurrence[multimer.name] = False
-            multimer_sampled_indices = multimer.sample_uniform(n_samples)
+            multimer_sampled_indices = multimer.sample(multimer_n_samples, method=method)
         else:
             multimer_sampled_indices = recursive_multimer_sampled_indices
 

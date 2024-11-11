@@ -1,3 +1,4 @@
+import logging
 import operator
 import numpy as np
 from typing import Optional, Union, List, Tuple
@@ -5,6 +6,8 @@ from functools import reduce
 from itertools import product
 from itertools import chain
 from dataforge.src import get_bonds, get_angles, get_dihedrals, union_rows_2d, intersect_rows_2d
+from sklearn.cluster import DBSCAN
+from scipy.spatial.distance import cdist
 
 
 class Monomer:
@@ -133,7 +136,10 @@ class Multimer:
         self,
         monomers: List[Monomer],
         orig_all_atom_types: np.ndarray,
+        logger: logging.Logger,
     ) -> None:
+        
+        self.logger = logger
         
         # self.monomers is a sorted list of Monomer objects
         # The sorting is done based on the name, and in case of the same name, it is done based on the ID.
@@ -210,7 +216,6 @@ class Multimer:
             self.name = f"{self.name}|{'.'.join(sorted(name))}"
 
         # ------------------------------------- #
-        
 
     def compute_descriptors(self):
         bond_values, angle_values, dihedral_values = [], [], []
@@ -270,6 +275,35 @@ class Multimer:
         if self.bond_values is None:
             raise Exception("Compute descriptors first!")
         return np.concatenate([self.bond_values, self.angle_values, self.dihedral_values], axis=1)
+    
+    @property
+    def descriptor_standardized_values(self) -> np.ndarray:
+        if self.bond_values is None:
+            raise Exception("Compute descriptors first!")
+        
+        standardized_values = []
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        
+        # Normalize bond lengths
+        bond_values = scaler.fit_transform(self.bond_values)
+        standardized_values.append(bond_values)
+
+        # Process angles by transforming to sine and cosine, then normalize
+        for values in [self.angle_values, self.dihedral_values]:
+            n_frames, n_values = values.shape
+            if n_values == 0:
+                continue
+            sin_components = np.sin(values)
+            cos_components = np.cos(values)
+            
+            # Normalize sin and cos components
+            sin_cos_data = np.hstack([sin_components, cos_components])
+            sin_cos_data = scaler.fit_transform(sin_cos_data)
+            
+            standardized_values.append(sin_cos_data)
+
+        return np.hstack(standardized_values)
 
     @property
     def descriptor_names(self) -> np.ndarray:
@@ -277,10 +311,21 @@ class Multimer:
             raise Exception("Compute descriptors first!")
         return np.concatenate([self.bond_names, self.angle_names, self.dihedral_names])
     
+    def sample(self, n_samples, method):
+        if n_samples == 0:
+            return np.array([], dtype=int)
+        if method == 'US':
+            return self.sample_uniform(n_samples)
+        if method == 'FPS':
+            return self.sample_furthest_point(n_samples)
+        raise Exception(f"Method '{method}' is not supported")
+    
     def sample_uniform(self, n_samples):
         descriptor_values = self.descriptor_values
         n_frames, n_descriptors = descriptor_values.shape
         samples_per_descriptor = max(n_samples // n_descriptors, 1)
+        self.logger.debug(f"Multimer {self.name} -- " +
+                          f"Sampling {n_samples} samples uniformly across {n_frames} frames and {n_descriptors} descriptors")
 
         descriptors_pool = descriptor_values.T.copy()
         if n_samples > descriptors_pool.shape[-1]:
@@ -296,3 +341,61 @@ class Multimer:
             not_sampled_idcs = np.setdiff1d(np.arange(n_frames), sampled_idcs)
             descriptors_pool = descriptor_values.copy()[not_sampled_idcs].T
         return sampled_idcs[:n_samples]
+
+    def sample_furthest_point(self, n_samples):
+
+        descriptor_values = self.descriptor_standardized_values
+        n_frames, n_descriptors = descriptor_values.shape
+
+        # Cluster data with DBSCAN
+        dbscan = DBSCAN(eps=1.0*np.sqrt(n_descriptors), min_samples=max(2, int(0.01 * n_frames)))  # eps is a mock value, should be tuned
+        dbscan.fit(descriptor_values)
+
+        # Check the clustering labels and adjust for cases where no clusters are formed
+        cluster_labels = dbscan.labels_
+        unique_labels = np.unique(cluster_labels[cluster_labels != -1])  # Exclude noise points (-1 label)
+
+        self.logger.debug(f"Multimer {self.name} -- " +
+                          f"Sampling {n_samples} samples using FPS across {n_frames} frames and {n_descriptors} descriptors." +
+                          f"Number of DBSCAN Clusters: {len(unique_labels)}")
+
+        # If clusters are formed, calculate cluster centers; otherwise, proceed with single "global" center
+        if len(unique_labels) > 0:
+            # Compute the centers of each cluster
+            cluster_centers = np.array([descriptor_values[cluster_labels == label].mean(axis=0) for label in unique_labels])
+        else:
+            # If no clusters are formed, use the mean of all data points as a single center
+            cluster_centers = np.array([descriptor_values.mean(axis=0)])
+        
+        # Furthest Point Sampling (FPS) to select N points that are maximally distant from the cluster centers
+        def furthest_point_sampling(data, cluster_centers, n_samples):
+            """
+            Selects n_samples points from the dataset that are farthest from cluster centers using Furthest Point Sampling.
+            
+            Parameters:
+            - data: numpy array, shape (n_samples, n_features), the feature vectors
+            - cluster_centers: numpy array, shape (n_clusters, n_features), the cluster centers
+            - n_samples: int, number of samples to select
+            
+            Returns:
+            - selected_indices: list of int, indices of the selected points
+            """
+            # Calculate the distance of each data point to the nearest cluster center
+            distances = np.min(cdist(data, cluster_centers), axis=1)
+            
+            # Initialize list of selected points with the point farthest from any cluster center
+            selected_indices = [np.argmax(distances)]
+            
+            # Iteratively select points that are maximally distant from the current selection
+            for _ in range(n_samples - 1):
+                # Calculate the minimum distance to any of the selected points
+                min_distances = np.min(cdist(data, data[selected_indices]), axis=1)
+                next_index = np.argmax(min_distances)  # Select point with maximum distance
+                selected_indices.append(next_index)
+            
+            return selected_indices
+
+        # Run FPS with cluster centers
+        selected_indices = furthest_point_sampling(descriptor_values, cluster_centers, n_samples)
+
+        return selected_indices

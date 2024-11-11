@@ -29,6 +29,7 @@ setup(
         "ase",
         "tqdm",
         "pandas",
+        "scikit-learn",
         "MDAnalysis",
     ],
     zip_safe=True,

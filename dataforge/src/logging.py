@@ -5,12 +5,12 @@ from typing import Optional
 
 from dataforge.src.generic import get_package_root
 
-def get_logger(log_filename: Optional[str] = None) -> logging.Logger:
+def get_logger(log_filename: Optional[str] = None, level = logging.INFO) -> logging.Logger:
     logFormatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-7.7s]  %(message)s")
     rootLogger = logging.getLogger("dataforge")
     if rootLogger.hasHandlers():
         rootLogger.handlers.clear()
-    rootLogger.setLevel(logging.INFO)
+    rootLogger.setLevel(level)
 
     if log_filename is not None:
         log_dir = os.path.join(
