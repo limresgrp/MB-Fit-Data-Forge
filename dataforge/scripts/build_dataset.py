@@ -706,7 +706,7 @@ def build_fitting_dataset(
                 save_opt_struct = True
                 for filename in glob.glob(os.path.join(nmer_dir, "*.xyz"), recursive=False):        
                     xyz_file = read(filename)
-                    info = f"{xyz_file.info['nmer_energy']} {xyz_file.info['binding_energy']}"
+                    info = f"{xyz_file.info['nmer_energy']} {xyz_file.info['binding_energy']} {basename(filename)}"
                     write(
                         out_filename,
                         xyz_file,
