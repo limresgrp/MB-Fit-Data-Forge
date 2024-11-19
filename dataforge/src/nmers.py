@@ -368,32 +368,59 @@ class Multimer:
             cluster_centers = np.array([descriptor_values.mean(axis=0)])
         
         # Furthest Point Sampling (FPS) to select N points that are maximally distant from the cluster centers
-        def furthest_point_sampling(data, cluster_centers, n_samples):
+        def furthest_point_sampling(points, cluster_centers, n_samples):
             """
             Selects n_samples points from the dataset that are farthest from cluster centers using Furthest Point Sampling.
             
             Parameters:
-            - data: numpy array, shape (n_samples, n_features), the feature vectors
+            - points: numpy array, shape (n_samples, n_features), the feature vectors
             - cluster_centers: numpy array, shape (n_clusters, n_features), the cluster centers
             - n_samples: int, number of samples to select
             
             Returns:
             - selected_indices: list of int, indices of the selected points
             """
-            # Calculate the distance of each data point to the nearest cluster center
-            distances = np.min(cdist(data, cluster_centers), axis=1)
+
+            # Store number of cluster_centers
+            n_cc = len(cluster_centers)
+            # Stack cluster_centers to points. They will behave like "already selected points"
+            _points = np.vstack([cluster_centers, points])
+            # Represent the points by their indices in points
+            points_left = np.arange(len(_points)) # [P]
+            # Initialise distances to inf
+            dists = np.ones_like(points_left) * float('inf') # [P]
+            # Initialise an array for the sampled indices
+            sample_inds = np.zeros(n_cc + n_samples, dtype='int') # [S]
+            # Select cluster_centers
+            sample_inds[:n_cc] = points_left[:n_cc]
+            # Remove cluster_centers from points_left
+            points_left = points_left[n_cc:]
+            # Initialize last_added to cluster_centers
+            last_added = sample_inds[:n_cc]
+
+            # Iteratively select points for a maximum of n_samples
+            for i in range(n_samples):
+                # Find the distance to the last added point in selected and all the others
+                if i > 0:
+                    last_added = sample_inds[n_cc+i-1:n_cc+i]
+                
+                dist_to_last_added_point = cdist(_points[last_added], _points[points_left]) # [P - i]
+
+                # If closer, updated distances
+                dists[points_left] = np.minimum(
+                    dist_to_last_added_point, 
+                    dists[points_left]
+                ) # [P - i]
+
+                # We want to pick the one that has the largest nearest neighbour
+                # distance to the sampled points
+                selected = np.argmax(dists[points_left])
+                sample_inds[n_cc+i] = points_left[selected]
+
+                # Update points_left
+                points_left = np.delete(points_left, selected)
             
-            # Initialize list of selected points with the point farthest from any cluster center
-            selected_indices = [np.argmax(distances)]
-            
-            # Iteratively select points that are maximally distant from the current selection
-            for _ in range(n_samples - 1):
-                # Calculate the minimum distance to any of the selected points
-                min_distances = np.min(cdist(data, data[selected_indices]), axis=1)
-                next_index = np.argmax(min_distances)  # Select point with maximum distance
-                selected_indices.append(next_index)
-            
-            return selected_indices
+            return sample_inds[n_cc:] - n_cc
 
         # Run FPS with cluster centers
         selected_indices = furthest_point_sampling(descriptor_values, cluster_centers, n_samples)
