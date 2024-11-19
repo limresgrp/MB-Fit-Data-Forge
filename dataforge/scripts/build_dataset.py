@@ -371,6 +371,7 @@ def build_raw_dataset(
 
                 nmer_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, dataset_root)
                 nmer_energy_contrib_csv = os.path.join(nmer_dataset_folder, DataDict.ENERGY_FILENAME)
+                nmer_energy_contrib_csv_kcal = os.path.join(nmer_dataset_folder, DataDict.ENERGY_FILENAME_KCAL)
 
                 if os.path.isfile(nmer_energy_contrib_csv):
                     if rule_if_file_exists is DataDict.SKIP:
@@ -448,10 +449,7 @@ def build_raw_dataset(
                     # ---------------- Writing data/dataset file for current nmer ------------------ #
 
                     atoms = read(nmer_capping_filename)
-                    symmetry_names_argsort_filename = get_symmetry_names_argsort_filename(
-                        dirname(nmer_capping_filename),
-                        basename(nmer_capping_filename)
-                    )
+                    symmetry_names_argsort_filename = get_symmetry_names_argsort_filename(nmer_capping_filename)
 
                     # Reorder atoms in capped xyz to have atoms of the same type grouped
                     # (same element and same connected atoms)
@@ -484,6 +482,13 @@ def build_raw_dataset(
                     logger.warning(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
                 else:
                     nmer_energy_contrib_df.to_csv(nmer_energy_contrib_csv, index=False)
+                    
+                    # Save a version of energy dict in Kcal/mol
+                    nmer_energy_contrib_df_kcal = nmer_energy_contrib_df.copy()
+                    # Apply the conversion function to specified columns
+                    columns_to_convert = ["total_energy", "nmer_energy", "binding_energy"]
+                    nmer_energy_contrib_df_kcal[columns_to_convert] = nmer_energy_contrib_df_kcal[columns_to_convert].applymap(hartrees2kcalmol)
+                    nmer_energy_contrib_df_kcal.to_csv(nmer_energy_contrib_csv_kcal, index=False)
 
                     # concat nmer_energy_contrib_df to nmer_energy_contrib_df_total
                     nmer_energy_contrib_df_total = update_nmer_df(
@@ -643,8 +648,8 @@ def get_name_from_symmetry_names(symmetry_names: np.ndarray):
         name += f"{k}{v}"
     return name
 
-def get_symmetry_names_argsort_filename(dname, fname):
-    return os.path.join(dname, f"{basename(fname).split('-')[1].split('.')[0]}.index")
+def get_symmetry_names_argsort_filename(fname):
+    return os.path.join(dirname(fname), f"{basename(fname).split('-')[1].split('.')[0]}.index")
 
 def get_nmer_indices(k: int):
     result = []
@@ -737,11 +742,14 @@ def convert_unit(filename: str, func):
         with open(filename, 'r') as f_in:
             for line in f_in.readlines():
                 line_splits = line.split()
-                if len(line_splits) == 2:
-                    nmer_energy, binding_energy = line_splits
-                    nmer_energy = func(float(nmer_energy))
-                    binding_energy = func(float(binding_energy))
-                    line = ' '.join([str(nmer_energy), str(binding_energy)]) + '\n'
+                if len(line_splits) >= 2: # xyz header can contain multiple info
+                    try:
+                        nmer_energy    = func(float(line_splits[0]))
+                        binding_energy = func(float(line_splits[1]))
+                        line = ' '.join([str(nmer_energy), str(binding_energy)] + line_splits[2:]) + '\n'
+                    except ValueError:
+                        # Ignore lines where conversion fails, as those are lines where first word is atom name
+                        pass
                 f_out.writelines(line)
 
 def save_optimized_structure(
@@ -782,9 +790,7 @@ def save_optimized_structure(
                     x, y, z = map(float, match.groups())
                     coords_list.append([x, y, z])
     coords = np.array(coords_list, dtype=np.float64)
-    symmetry_names_argsort_filename = get_symmetry_names_argsort_filename(
-        dirname(filename).replace(dataset_root, nmers_capped_root), basename(qchem_output_file)
-    )
+    symmetry_names_argsort_filename = get_symmetry_names_argsort_filename(filename.replace(dataset_root, nmers_capped_root))
     symmetry_names_argsort = np.loadtxt(symmetry_names_argsort_filename, dtype=int)
     xyz_file.positions = coords[symmetry_names_argsort]
     write(

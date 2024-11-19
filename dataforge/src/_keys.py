@@ -12,5 +12,6 @@ OVERWRITE: Final[int] = 2
 
 # --------------------------------------- #
 
-ENERGY_FILENAME  : Final[str] = "energy.csv"
-TOPOLOGY_FILENAME: Final[str] = "topology.json"
+ENERGY_FILENAME     : Final[str] = "energy.csv"
+ENERGY_FILENAME_KCAL: Final[str] = "energy.kcal.csv"
+TOPOLOGY_FILENAME   : Final[str] = "topology.json"
