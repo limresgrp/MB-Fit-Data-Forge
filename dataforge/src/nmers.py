@@ -217,6 +217,8 @@ class Multimer:
 
         # ------------------------------------- #
 
+        self.logger.info(f"Multimer {self.name} -- Built with following monomers: {','.join([m.name for m in self.monomers])}")
+
     def compute_descriptors(self):
         bond_values, angle_values, dihedral_values = [], [], []
         bond_names, angle_names, dihedral_names = [], [], []
@@ -348,7 +350,7 @@ class Multimer:
         n_frames, n_descriptors = descriptor_values.shape
 
         # Cluster data with DBSCAN
-        dbscan = DBSCAN(eps=1.0*np.sqrt(n_descriptors), min_samples=max(2, int(0.01 * n_frames)))  # eps is a mock value, should be tuned
+        dbscan = DBSCAN(eps=1.0*np.sqrt(n_descriptors), min_samples=max(2, int(0.01 * n_frames)))
         dbscan.fit(descriptor_values)
 
         # Check the clustering labels and adjust for cases where no clusters are formed
