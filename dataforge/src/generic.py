@@ -1,4 +1,7 @@
 import os
+import re
+import ast
+import h5py
 import numpy as np
 from functools import reduce
 from typing import Callable, List
@@ -81,3 +84,72 @@ def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: i
     
     # Apply the pass n times using reduce over the string
     return reduce(lambda acc, _: apply_once(acc), range(n), input_string)
+
+def parse_string_to_dict(input_string) -> dict:
+    """
+    Parses a string representation of key-value pairs into a dictionary.
+
+    The input string should have key-value pairs separated by commas, with keys and values
+    separated by '='. Keys and values that are not lists or nested structures will be wrapped
+    in quotes. Lists will be converted to NumPy arrays.
+
+    Args:
+        input_string (str): The input string containing key-value pairs.
+
+    Returns:
+        dict: A dictionary with keys and values parsed from the input string. Lists are converted
+              to NumPy arrays.
+
+    Raises:
+        ValueError: If the input string cannot be parsed into a dictionary.
+
+    Example:
+        input_string = "key1=value1,key2=[1,2,3],key3=value3"
+        result = parse_string_to_dict(input_string)
+        # result will be {'key1': 'value1', 'key2': np.array([1, 2, 3]), 'key3': 'value3'}
+    """
+    # Preprocess the string to add quotes around unquoted keys and values
+    def add_quotes(match):
+        key, value = match.groups()
+        # Wrap the key in quotes
+        key = f"'{key}'"
+        # Wrap the value in quotes if it's not a list or nested structure
+        if not re.match(r"[\[{]", value):  # Skip lists or nested structures
+            value = f"'{value}'"
+        return f"{key}={value}"
+
+    # Add quotes to keys and values
+    preprocessed_string = re.sub(r"(\w+)=([^,]+)", add_quotes, input_string)
+
+    # Replace '=' with ':' to mimic a dictionary structure
+    dict_like_string = preprocessed_string.replace("=", ":")
+
+    # Use ast.literal_eval to safely evaluate the string as a dictionary
+    try:
+        parsed_dict = ast.literal_eval(f"{{{dict_like_string}}}")
+    except (ValueError, SyntaxError) as e:
+        raise ValueError(f"Failed to parse the input string: {e}")
+
+    # Process the dictionary to convert lists to NumPy arrays
+    for key, value in parsed_dict.items():
+        if isinstance(value, list):
+            # Check if all elements are strings
+            if all(isinstance(elem, str) for elem in value):
+                parsed_dict[key] = np.array(value, dtype=np.string_)
+            else:
+                parsed_dict[key] = np.array(value)
+
+    return parsed_dict
+
+def read_h5_file(h5_filepath: str):
+    with h5py.File(h5_filepath, 'r') as h5f:
+        all_coords       = h5f['coordinates'] [:]
+        all_atom_types   = h5f['atom_types']  [:].astype("U")
+        all_info_strings = h5f['info_strings'][:].astype("U")
+    return all_coords, all_atom_types, all_info_strings
+
+def write_h5_file(h5_filepath: str, all_coords: np.ndarray, all_atom_types: np.ndarray, all_info_strings: np.ndarray):
+    with h5py.File(h5_filepath, 'w') as h5f:
+        h5f.create_dataset('coordinates',  data=all_coords)
+        h5f.create_dataset('atom_types',   data=all_atom_types.astype(np.string_))
+        h5f.create_dataset('info_strings', data=all_info_strings.astype(np.string_))

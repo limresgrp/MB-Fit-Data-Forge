@@ -273,6 +273,14 @@ class Multimer:
             self.dihedral_names = np.empty((0,), dtype=np.dtype('<U1'))
     
     @property
+    def fullname(self):
+        return f"{self.name}_" + "_".join(self.monomers_idcs)
+
+    @property
+    def h5_filename(self):
+        return self.fullname + ".h5"
+
+    @property
     def descriptor_values(self) -> np.ndarray:
         if self.bond_values is None:
             raise Exception("Compute descriptors first!")

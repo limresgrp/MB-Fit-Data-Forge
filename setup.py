@@ -26,6 +26,7 @@ setup(
     },
     install_requires=[
         "numpy",
+        "h5py",
         "ase",
         "tqdm",
         "pandas",
