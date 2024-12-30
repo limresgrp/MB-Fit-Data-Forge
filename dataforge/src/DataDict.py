@@ -10,9 +10,9 @@ FOLDER_NAMES = {
 }
 
 ATOM_TYPE_TO_H_DISTANCE = {
-    6: 1.086, # Old was 1.14 | 1.086 C-HG, 1.092 HG-C=OO, 1.08 C=C-H
-    7: 1.022, # Old was 1.12
-    8: 0.963, # Old was 1.1
+    6: 1.086, # 1.086 C-HG, 1.092 HG-C=OO, 1.08 C=C-H
+    7: 1.022, # 1.022 N-HG,
+    8: 0.963, # 0.963 O-HG,
 }
 
 MONOMERS_DICT = {
