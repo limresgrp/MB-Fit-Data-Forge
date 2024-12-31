@@ -113,8 +113,8 @@ class Monomer:
 class Multimer:
 
     name: str
-    monomers: List[Monomer]
-    monomers_idcs: List[int]
+    _monomers: List[Monomer]
+    _monomers_idcs: List[int]
 
     orig_all_atoms_idcs: np.ndarray       # indices of all atoms belonging and connected to the multimer
     orig_atoms_idcs: np.ndarray           # indices of all atoms belonging to the multimer
@@ -141,11 +141,10 @@ class Multimer:
         
         self.logger = logger
         
-        # self.monomers is a sorted list of Monomer objects
+        # self._monomers is a sorted list of Monomer objects
         # The sorting is done based on the name, and in case of the same name, it is done based on the ID.
-        self.monomers = sorted(monomers, key=operator.attrgetter('name', 'id'))
-        del monomers
-        self.monomers_idcs = [str(m.id) for m in self.monomers]
+        self._monomers = sorted(monomers, key=operator.attrgetter('name', 'id'))
+        self._monomers_idcs = [str(m.id) for m in self._monomers]
         
         # -------------------------------- ! ! ! ---------------------------------- #
         # orig_ prefix refers to a property of the original database.
@@ -155,25 +154,24 @@ class Multimer:
         # -------------------------------- ! ! ! ---------------------------------- #
 
         # All heavy atoms of the multimer (no H)
-        self.orig_heavy_atoms_idcs = np.concatenate([m.orig_heavy_atoms_idcs for m in self.monomers])
+        self.orig_heavy_atoms_idcs = np.concatenate([m.orig_heavy_atoms_idcs for m in self._monomers])
         
-        self.orig_heavy_atoms_monomer_names = list(chain.from_iterable([[m.name for _ in m.orig_heavy_atoms_idcs] for m in self.monomers]))
+        self.orig_heavy_atoms_monomer_names = list(chain.from_iterable([[m.name for _ in m.orig_heavy_atoms_idcs] for m in self._monomers]))
         self.orig_heavy_atoms_idcs_to_monomer_names = {
             k: v
             for k, v in zip(self.orig_heavy_atoms_idcs, self.orig_heavy_atoms_monomer_names)
         }
 
-        self.orig_bond_idcs = reduce(union_rows_2d, ([m.orig_bond_idcs for m in self.monomers]))
-        self.orig_angle_idcs = reduce(union_rows_2d, ([m.orig_angle_idcs for m in self.monomers]))
-        self.orig_dihedral_idcs = reduce(union_rows_2d, ([m.orig_dihedral_idcs for m in self.monomers]))
+        # Compute bond, angle and dihedral indices
+        self.orig_bond_idcs     = reduce(union_rows_2d, ([m.orig_bond_idcs     for m in self._monomers]))
+        self.orig_angle_idcs    = reduce(union_rows_2d, ([m.orig_angle_idcs    for m in self._monomers]))
+        self.orig_dihedral_idcs = reduce(union_rows_2d, ([m.orig_dihedral_idcs for m in self._monomers]))
 
         # All atoms connected + belonging to the multimer (heavy + H)
         self.orig_all_atoms_idcs = np.unique(self.orig_bond_idcs)
         # All (heavy) atoms connected, but not belonging to the multimer
         self.orig_connected_atoms_idcs = self.orig_all_atoms_idcs[np.logical_and(
-            ~np.isin(
-                self.orig_all_atoms_idcs, self.orig_heavy_atoms_idcs
-            ),
+            ~np.isin(self.orig_all_atoms_idcs, self.orig_heavy_atoms_idcs),
             orig_all_atom_types[self.orig_all_atoms_idcs] != 'H',
         )]
         # All atoms of the multimer (heavy + H)
@@ -183,47 +181,48 @@ class Multimer:
             assume_unique=True,
         )
 
-        # --- ! ! ! A T T E N T I O N ! ! ! --- #
+        self._compute_name() # Multimer name property is used to distinguish different Multimers.
 
-        # Multimer name property is used to distinguish different Multimers.
-        
+        # ------------------------------------- #
+
+        self.logger.info(f"Multimer {self.name} -- Built with following monomers: {','.join([m.name for m in self._monomers])}")
+
+    def _compute_name(self):
+
+        # --- ! ! ! A T T E N T I O N ! ! ! --- #
         # This algorithm is not able to distinguish multimers of degree 4+ that differ in the
         # connectivity among monomers with the same name
         
-        monomer_names = [mon.name for mon in self.monomers]
+        monomer_names = [m.name for m in self._monomers]
         _, monomer_name_unique_idcs = np.unique(np.array(monomer_names), return_inverse = True)
         monomer_name_unique_idcs = [str(x) for x in monomer_name_unique_idcs]
         monomer_name_unique_to_monomer_name_unique_idcs = {
             k: v
             for k, v in zip(monomer_names, monomer_name_unique_idcs)
         }
-        self.orig_heavy_atoms_idcs_to_monomer_name_unique_idcs = {
+        orig_heavy_atoms_idcs_to_monomer_name_unique_idcs = {
             k: monomer_name_unique_to_monomer_name_unique_idcs[v]
             for k, v in zip(self.orig_heavy_atoms_idcs, self.orig_heavy_atoms_monomer_names)
         }
         self.name = '.'.join(monomer_names)
         
-        if len(self.monomers) > 2:
+        if len(self._monomers) > 2:
             name = []
-            for m, name_unique_id in zip(self.monomers, monomer_name_unique_idcs):
+            for m, name_unique_id in zip(self._monomers, monomer_name_unique_idcs):
                 connections = []
                 other_monomers_all_orig_heavy_atoms_idcs = np.array(list(set(self.orig_heavy_atoms_idcs).union(set(self.orig_connected_atoms_idcs)) - set(m.orig_heavy_atoms_idcs)))
                 for pair in product(m.orig_heavy_atoms_idcs, other_monomers_all_orig_heavy_atoms_idcs):
                     pair = np.array(pair)
                     if len(intersect_rows_2d(self.orig_bond_idcs, pair)>0) or len(intersect_rows_2d(self.orig_bond_idcs, np.ascontiguousarray(pair[::-1]))>0):
-                        connections.append(self.orig_heavy_atoms_idcs_to_monomer_name_unique_idcs.get(pair[1], 'H'))
+                        connections.append(orig_heavy_atoms_idcs_to_monomer_name_unique_idcs.get(pair[1], 'H'))
                 name.append(f"{name_unique_id}_{''.join(sorted(connections))}")
             self.name = f"{self.name}|{'.'.join(sorted(name))}"
-
-        # ------------------------------------- #
-
-        self.logger.info(f"Multimer {self.name} -- Built with following monomers: {','.join([m.name for m in self.monomers])}")
 
     def compute_descriptors(self):
         bond_values, angle_values, dihedral_values = [], [], []
         bond_names, angle_names, dihedral_names = [], [], []
         already_computed_bond, already_computed_angle, already_computed_dihedral = [], [], []
-        for monomer in self.monomers:
+        for monomer in self._monomers:
             for bond_idcs, bond_value, bond_name in zip(
                 monomer.orig_bond_idcs,
                 monomer.bond_values.T,
@@ -274,7 +273,7 @@ class Multimer:
     
     @property
     def fullname(self):
-        return f"{self.name}_" + "_".join(self.monomers_idcs)
+        return f"{self.name}_" + "_".join(self._monomers_idcs)
 
     @property
     def h5_filename(self):
@@ -353,7 +352,6 @@ class Multimer:
         return sampled_idcs[:n_samples]
 
     def sample_furthest_point(self, n_samples):
-
         descriptor_values = self.descriptor_standardized_values
         n_frames, n_descriptors = descriptor_values.shape
 

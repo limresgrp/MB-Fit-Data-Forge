@@ -3,20 +3,22 @@ import logging
 import os
 import glob
 import json
+from pathlib import Path
 import numpy as np
 import multiprocessing
 from logging import Logger
 from multiprocessing import Lock
+from collections import Counter
 
-from os.path import join, dirname
+from os.path import join, dirname, basename
 from typing import Dict, List, Optional, Union
 from itertools import combinations, zip_longest
 
-from dataforge.src import DataDict, intersect_rows_2d, dynamic_for_loop
+from dataforge.src import DataDict, intersect_rows_2d, dynamic_for_loop, fix_bonds, apply_replacements_fp
 from dataforge.src.qchem_utils import prepare_qchem_input
 from dataforge.src.logging import get_logger
 from dataforge.src.nmers import Monomer, Multimer
-from dataforge.src.generic import parse_string_to_dict, read_h5_file, write_h5_file
+from dataforge.src.generic import argofyinx, parse_string_to_dict, parse_dict_to_string, read_h5_file, write_h5_file
 
 
 # Create a global lock
@@ -83,14 +85,18 @@ def build_nmers(
     nmer_sampling_conf: Union[List[int], Dict[int, int]],
     keep_only_monomer_names: Optional[List[str]] = None,
     max_processes: int = 4,
+    **kwargs
 ):
     logger = get_logger('02_build_nmers.log', level=logging.DEBUG)
     
-    DATA_ROOT =          join(dataset_root, "data"           )
-    NMERS_ROOT =         join(DATA_ROOT,    "xyz"            )
-    NMERS_CAPPED_ROOT =  join(DATA_ROOT,    "xyz_capped"     )
-    QCHEM_IN_ROOT =      join(DATA_ROOT,    "qchem_input"    )
-    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT,    "qchem_min_input")
+    DATA_ROOT         =  join(dataset_root, "data"           )
+    NMERS_ROOT        =  join(DATA_ROOT   , "xyz"            )
+    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     )
+    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    )
+    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input")
+
+    FIT_ROOT           =                                          join(dataset_root, "fitting")
+    FIT_POLY_ROOT      = kwargs.get('FIT_POLY_ROOT',     None) or join(FIT_ROOT    , "poly"   )
 
     if isinstance(nmer_sampling_conf, list):
         nmer_sampling_conf = {int(k): None for k in nmer_sampling_conf}
@@ -112,6 +118,7 @@ def build_nmers(
     build_xyz_capped_nmers(
         nmers_root              = NMERS_ROOT,
         nmers_capped_root       = NMERS_CAPPED_ROOT,
+        fit_poly_root           = FIT_POLY_ROOT,
         logger                  = logger,
         max_processes           = max_processes,
     )
@@ -357,7 +364,7 @@ def save_multimer(
         severed_names = np.zeros((len(severed_idcs),), dtype=object)
         severed_bonded_idcs = get_bonded_idcs(severed_idcs, multimer, multimer)
 
-        for m_id, monomer in enumerate(multimer.monomers):
+        for m_id, monomer in enumerate(multimer._monomers):
             # Index of all monomer atoms, relative to multimer atoms only
             monomer_idcs = np.argwhere(np.isin(multimer.orig_all_atoms_idcs, monomer.orig_atoms_idcs)).flatten()
             for severed_atom_idx, mocai in enumerate(multimer.orig_connected_atoms_idcs):
@@ -367,7 +374,7 @@ def save_multimer(
             info_string += f", monomer_{m_id + 1}_idcs={monomer_idcs.tolist()}"
             info_string += f", monomer_{m_id + 1}_bonded_idcs={get_bonded_idcs(monomer_idcs, multimer, monomer).tolist()}"
         
-        info_string += f", severed_names={severed_names.tolist()}"
+        info_string += f", severed_name={severed_names.tolist()}"
         info_string += f", severed_idcs={severed_idcs.tolist()}"
         info_string += f", severed_bonded_idcs={severed_bonded_idcs.tolist()}"
 
@@ -544,7 +551,7 @@ def process_multimer(
     build_multimer_recursively(
         nmers_root=nmers_root,
         nmer_sampling_conf=nmer_sampling_conf,
-        monomers=multimer.monomers,
+        monomers=multimer._monomers,
         n=n-1,
         folder_name=os.path.join(folder_name, DataDict.FOLDER_NAMES.get(n-1, "")),
         orig_pos=orig_pos,
@@ -552,7 +559,7 @@ def process_multimer(
         logger=logger,
         recursive_multimer_sampled_indices=multimer_sampled_indices,
         compute_descriptors=compute_descriptors,
-        max_processes=max_processes,
+        max_processes=0, # Daemonic processes are not allowed to have children
     )
 
 def build_multimers(
@@ -581,8 +588,7 @@ def build_multimers(
             max_processes=max_processes,
         )
 
-def substitute_severed_atoms(all_coords, all_atom_types, all_info_strings):
-    info_dict = parse_string_to_dict(all_info_strings[0])
+def substitute_severed_atoms(all_coords, all_atom_types, info_dict: dict):
     severed_idcs = info_dict.get("severed_idcs")
     nmer_idcs = np.delete(np.arange(all_coords.shape[1]), severed_idcs)
     nmer_coords = all_coords[:, nmer_idcs]
@@ -605,23 +611,157 @@ def substitute_severed_atoms(all_coords, all_atom_types, all_info_strings):
 
     return all_coords, all_atom_types
 
-def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, logger: Logger):
+def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly_root: str, logger: Logger):
     h5_capped_filepath = h5_filepath.replace(nmers_root, nmers_capped_root)
-    os.makedirs(dirname(h5_capped_filepath), exist_ok=True)
+    h5_capped_folder = dirname(h5_capped_filepath)
+    os.makedirs(h5_capped_folder, exist_ok=True)
     if os.path.exists(h5_capped_filepath):
         logger.warning(f"File {h5_capped_filepath} exists already. Overwriting...")
 
     # Load the H5 file saved in save_multimer
     all_coords, all_atom_types, all_info_strings = read_h5_file(h5_filepath)
 
+    info_dict = parse_string_to_dict(all_info_strings[0])
+
     # Process the data
-    capped_coords, capped_atom_types = substitute_severed_atoms(all_coords, all_atom_types, all_info_strings)
+    capped_coords, capped_atom_types = substitute_severed_atoms(all_coords, all_atom_types, info_dict)
+
+    # --
+
+    result = assign_symmetry_names_and_reorder(capped_coords, capped_atom_types, info_dict)
+
+    nmer_poly_folder = h5_capped_folder.replace(nmers_capped_root, fit_poly_root)
+    poly_generator_filename = apply_replacements_fp(os.path.join(nmer_poly_folder, "poly_generator.py"))
+    save_poly_generator(result, poly_generator_filename, logger)
+
+    # --
 
     # Save the capped nmers to a new H5 file
+
+    capped_coords = result.get('all_coords')
+    capped_atom_types = result.get('all_atom_types')
+    # capped_all_info_strings = []
+    # for old_info_string in all_info_strings:
+    #     info_dict = parse_string_to_dict(old_info_string)
+    #     info_string = parse_dict_to_string(info_dict)
+    #     capped_all_info_strings.append(info_string)
+    # capped_all_info_strings = np.array(capped_all_info_strings)
+
     with lock:
         write_h5_file(h5_capped_filepath, capped_coords, capped_atom_types, all_info_strings)
 
-def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str, logger: Logger, max_processes: int = 4):
+def save_poly_generator(data: dict, poly_generator_filename: str, logger: Logger):
+    poly_generator_folder = dirname(poly_generator_filename)
+    nmer_name = basename(poly_generator_folder)
+    if os.path.isfile(poly_generator_filename):
+        logger.info(f"--- Found polynomial generator for {nmer_name} ---")
+        return
+    # Create folder for code generating polynomials
+    if not os.path.exists(poly_generator_filename):
+        logger.info(f"--- Writing polynomial generator for {nmer_name} ---")
+        os.makedirs(dirname(poly_generator_filename))
+    
+    # Read poly_generator python code template
+    current_dir = Path(__file__).parent
+    with open(current_dir.parent / 'templates' / 'poly_generator_template.py', 'r') as src:
+        code = src.read()
+
+    # Build symmetry names one line at a time
+    symmetry_names = data.get('symmetry_names_sorted')
+    per_atom_bonded_atoms = data.get('per_atom_bonded_atoms')
+    add_atom_lines = []
+    for symmetry_name, atom_bonded_atoms in zip(symmetry_names, per_atom_bonded_atoms):
+        add_atom_lines.append([symmetry_name] + atom_bonded_atoms)
+    
+    add_atoms_code = """"""
+    for add_atom_line in add_atom_lines:
+        add_atoms_code += f'add_atom{[str(elem) for elem in add_atom_line]}\n'
+
+    code=code.replace('[FOLDER]', nmer_name)
+    code=code.replace('[NAME]', get_name_from_symmetry_names(symmetry_names))
+    code=code.replace('[ADD_ATOMS]', add_atoms_code)
+    code=code.replace('[MONOMER_INDICES]', '[[],]')
+    code=code.replace('[NMER_INDICES]', get_nmer_indices(data.get('num_monomers')))
+    with open(poly_generator_filename, 'w') as trg:
+        trg.write(code)
+    logger.info(f"--- Polynomial generator for {nmer_name} saved! ---")
+
+def assign_symmetry_names_and_reorder(all_coords, all_atom_types, info_dict):
+    atom_identities            = []
+    atom_bonded_idcs_list      = []
+    atom_bonded_index_keys     = []
+    atom_identities_general    = []
+    atom_name_to_symmetry_name = {}
+
+    _atom_index_keys: List[str] = [key for key in info_dict.keys() if 'idcs' in key and 'bonded' not in key]
+    for _id, _at in enumerate(all_atom_types[0]):
+        for _aikey in _atom_index_keys:
+            _aikey_info = np.asarray(info_dict[_aikey]).reshape(-1,)
+            if _id in _aikey_info:
+                atom_bonded_index_key_fragments = _aikey.split('_')
+                atom_bonded_index_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_bonded_' + atom_bonded_index_key_fragments[-1]
+                monomer_name_key = '_'.join(atom_bonded_index_key_fragments[:-1]) + '_name'
+                atom_bonded_index_argwhere = np.argwhere(_aikey_info == _id).item()
+                break
+        atom_bonded_idcs = info_dict[atom_bonded_index_key][atom_bonded_index_argwhere]
+        atom_bonded_idcs = atom_bonded_idcs[atom_bonded_idcs != -1]
+        atom_bonded_idcs_list.append(atom_bonded_idcs)
+        if isinstance(info_dict[monomer_name_key], List) or isinstance(info_dict[monomer_name_key], np.ndarray):
+            monomer_name = info_dict[monomer_name_key][atom_bonded_index_argwhere]
+        else:
+            monomer_name = info_dict[monomer_name_key]
+        assert isinstance(monomer_name, str)
+        atom_identity = monomer_name + '|' + _at + '-' + ''.join(np.sort(all_atom_types[0][atom_bonded_idcs]))
+        atom_identity_general = monomer_name + '|' + _at + '-' + str(len(atom_bonded_idcs))
+        atom_identities.append(atom_identity)
+        atom_identities_general.append(atom_identity_general)
+        atom_bonded_index_keys.append(atom_bonded_index_key)
+    
+    atom_identities = np.array(atom_identities)
+    atom_identities_general = np.array(atom_identities_general)
+    sort_idcs = np.argsort(atom_identities_general)
+    atom_identities_sorted = atom_identities[sort_idcs]
+    atom_identities_general_sorted = atom_identities_general[sort_idcs]
+
+    for atom_identity_sorted, atom_identity_general_sorted in zip(atom_identities_sorted, atom_identities_general_sorted):
+        if atom_identity_sorted not in atom_name_to_symmetry_name:
+            antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT.get(atom_identity_sorted, None)
+            if antosn is None:
+                antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT_GENERAL.get(atom_identity_general_sorted)
+            atom_name_to_symmetry_name[atom_identity_sorted] = antosn
+
+    symmetry_names = np.array([
+        atom_name_to_symmetry_name.get(an) + ('G' if 'severed' in abik else '')
+        for an, abik in zip(atom_identities, atom_bonded_index_keys)
+    ])
+    symmetry_names_argsort = np.argsort(symmetry_names)
+    per_atom_bonded_atoms = [argofyinx(symmetry_names_argsort, atom_bonded_idcs_list[sna]).tolist() for sna in symmetry_names_argsort]
+
+    return {
+        'num_monomers'          : len(_atom_index_keys) - 1,
+        'symmetry_names_argsort': symmetry_names_argsort,
+        'per_atom_bonded_atoms' : per_atom_bonded_atoms,
+        'symmetry_names_sorted' : symmetry_names[symmetry_names_argsort],
+        'all_coords'            : all_coords    [:, symmetry_names_argsort],
+        'all_atom_types'        : all_atom_types[:, symmetry_names_argsort],
+    }
+
+def get_name_from_symmetry_names(symmetry_names: np.ndarray):
+    name = ""
+    for k, v in Counter(symmetry_names).items():
+        name += f"{k}{v}"
+    return name
+
+def get_nmer_indices(k: int):
+    result = []
+    for i in range(1, k+1):
+        result.extend(combinations(range(k), i))
+    return str([
+        x for x in [list(comb) for comb in result]
+        if all(x[j] == x[j - 1] + 1 for j in range(1, len(x)))
+    ])
+
+def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str, fit_poly_root: str, logger: Logger, max_processes: int = 4):
     logger.info("- Capping nmers...")
     h5_filepaths = list(glob.iglob(os.path.join(nmers_root, "**/*.h5"), recursive=True))
 
@@ -634,6 +774,7 @@ def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str, logger: Logg
                         h5_filepath,
                         nmers_root,
                         nmers_capped_root,
+                        fit_poly_root,
                         logger,
                     )
                     for h5_filepath in h5_filepaths
@@ -642,7 +783,7 @@ def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str, logger: Logg
         pool.join()
     else:
         for h5_filepath in h5_filepaths:
-            cap_nmer(h5_filepath, nmers_root=nmers_root, nmers_capped_root=nmers_capped_root, logger=logger)
+            cap_nmer(h5_filepath, nmers_root, nmers_capped_root, fit_poly_root, logger)
     logger.info("- Completed capping nmers!")
 
 

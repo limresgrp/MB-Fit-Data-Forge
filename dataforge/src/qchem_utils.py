@@ -84,14 +84,14 @@ def prepare_qchem_input(
         logger.setLevel(logging.INFO)
     logger.info("- Preparing QChem input files...")
 
-    # h5_filepaths = list(glob.iglob(os.path.join(nmers_capped_root, "**/*.h5"), recursive=True))
-    # if max_processes > 0:
-    #     with multiprocessing.Pool(processes=max_processes) as pool:
-    #         pool.starmap(write_qchem_input, [(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict) for h5_filepath in h5_filepaths])
-    #     pool.join()
-    # else:
-    #     for h5_filepath in h5_filepaths:
-    #         write_qchem_input(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict)
+    h5_filepaths = list(glob.iglob(os.path.join(nmers_capped_root, "**/*.h5"), recursive=True))
+    if max_processes > 0:
+        with multiprocessing.Pool(processes=max_processes) as pool:
+            pool.starmap(write_qchem_input, [(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict) for h5_filepath in h5_filepaths])
+        pool.join()
+    else:
+        for h5_filepath in h5_filepaths:
+            write_qchem_input(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict)
     
     def get_inp_files(qchem_in_root):
         h5_filepaths = []
@@ -110,10 +110,5 @@ def prepare_qchem_input(
     else:
         for h5_min_filepath in h5_min_filepaths:
             write_qchem_min_input(h5_min_filepath, qchem_in_root, qchem_min_in_root)
-    
-    # prepare_qchem_min_input(
-    #     qchem_in_root,
-    #     qchem_min_in_root,
-    # )
 
     logger.info("- Completed preparing QChem input files!")

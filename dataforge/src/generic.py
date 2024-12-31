@@ -6,6 +6,17 @@ import numpy as np
 from functools import reduce
 from typing import Callable, List
 
+
+def argofyinx(x, y):
+    index = np.argsort(x)
+    sorted_x = x[index]
+    sorted_index = np.searchsorted(sorted_x, y)
+
+    yindex = np.take(index, sorted_index, mode="clip")
+    mask = x[yindex] != y
+
+    return np.ma.array(yindex, mask=mask)
+
 def append_suffix_to_filename(filename, suffix):
     base_name, extension = os.path.splitext(filename)
     new_filename = f"{base_name}{suffix}{extension}"
@@ -85,7 +96,7 @@ def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: i
     # Apply the pass n times using reduce over the string
     return reduce(lambda acc, _: apply_once(acc), range(n), input_string)
 
-def parse_string_to_dict(input_string) -> dict:
+def parse_string_to_dict(input_string: str) -> dict:
     """
     Parses a string representation of key-value pairs into a dictionary.
 
@@ -133,13 +144,19 @@ def parse_string_to_dict(input_string) -> dict:
     # Process the dictionary to convert lists to NumPy arrays
     for key, value in parsed_dict.items():
         if isinstance(value, list):
-            # Check if all elements are strings
-            if all(isinstance(elem, str) for elem in value):
-                parsed_dict[key] = np.array(value, dtype=np.string_)
-            else:
-                parsed_dict[key] = np.array(value)
+            parsed_dict[key] = np.array(value)
 
     return parsed_dict
+
+def parse_dict_to_string(input_dict: dict) -> str:
+    string = ""
+    for k, v in input_dict.items():
+        string += f"{k}="
+        if isinstance(v, str):
+            string += f"{v}, "
+        elif isinstance(v, np.ndarray):
+            string += f"{v.tolist()}, "
+    return string
 
 def read_h5_file(h5_filepath: str):
     with h5py.File(h5_filepath, 'r') as h5f:
