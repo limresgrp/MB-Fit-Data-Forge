@@ -2,9 +2,10 @@ from logging import Logger
 import multiprocessing
 import os
 import glob
+import numpy as np
 
 from os.path import dirname, basename
-from dataforge.src.generic import parse_string_to_dict, read_h5_file
+from dataforge.src.generic import read_h5_file
 
 
 BLUEPRINT_1 = f'''```
@@ -28,7 +29,8 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
     os.makedirs(qchem_in_root_folder, exist_ok=True)
     
     # Load the H5 file saved in save_multimer
-    all_coords, all_atom_types, all_info_strings = read_h5_file(h5_filepath)
+    all_coords, all_atom_types, all_info_dicts, extra_info = read_h5_file(h5_filepath)
+    all_fullnames = np.array([d['fullname'] for d in all_info_dicts])
     in_nmer_folder = basename(dirname(h5_filepath))
     
     charge = 0
@@ -39,9 +41,14 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
             charge += ch
     multiplicity = 1
 
-    for coords, atom_types, info_string in zip(all_coords, all_atom_types, all_info_strings):
-        info_dict = parse_string_to_dict(info_string)
-        output_filename = os.path.join(qchem_in_root_folder, info_dict.get('fullname') + '.inp')
+    frame_filter = None
+    if frame_filter is None:
+        frame_filter = np.arange(10)#len(all_coords))
+    for coords, atom_types, fullname in zip(all_coords[frame_filter], all_atom_types[frame_filter], all_fullnames[frame_filter]):
+        splits = fullname.split('_')
+        frame_id = splits[0]
+        monomer_idcs = splits[-int(extra_info.get("num_monomers")):]
+        output_filename = os.path.join(qchem_in_root_folder, f'f{frame_id}-{"_".join(monomer_idcs)}' + '.inp')
         if os.path.exists(output_filename):
             continue
         

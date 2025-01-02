@@ -1,11 +1,17 @@
+import json
 import os
 import re
 import ast
 import h5py
 import numpy as np
 from functools import reduce
-from typing import Callable, List
+from typing import Callable, List, Union
 
+
+def append_suffix_to_filename(filename, suffix):
+    base_name, extension = os.path.splitext(filename)
+    new_filename = f"{base_name}{suffix}{extension}"
+    return new_filename
 
 def argofyinx(x, y):
     index = np.argsort(x)
@@ -16,11 +22,6 @@ def argofyinx(x, y):
     mask = x[yindex] != y
 
     return np.ma.array(yindex, mask=mask)
-
-def append_suffix_to_filename(filename, suffix):
-    base_name, extension = os.path.splitext(filename)
-    new_filename = f"{base_name}{suffix}{extension}"
-    return new_filename
 
 def dynamic_for_loop(iterable, num_for_loops, func: Callable, args: List = [], **extra_args):
         if num_for_loops == 1:
@@ -96,77 +97,60 @@ def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: i
     # Apply the pass n times using reduce over the string
     return reduce(lambda acc, _: apply_once(acc), range(n), input_string)
 
-def parse_string_to_dict(input_string: str) -> dict:
-    """
-    Parses a string representation of key-value pairs into a dictionary.
-
-    The input string should have key-value pairs separated by commas, with keys and values
-    separated by '='. Keys and values that are not lists or nested structures will be wrapped
-    in quotes. Lists will be converted to NumPy arrays.
-
-    Args:
-        input_string (str): The input string containing key-value pairs.
-
-    Returns:
-        dict: A dictionary with keys and values parsed from the input string. Lists are converted
-              to NumPy arrays.
-
-    Raises:
-        ValueError: If the input string cannot be parsed into a dictionary.
-
-    Example:
-        input_string = "key1=value1,key2=[1,2,3],key3=value3"
-        result = parse_string_to_dict(input_string)
-        # result will be {'key1': 'value1', 'key2': np.array([1, 2, 3]), 'key3': 'value3'}
-    """
-    # Preprocess the string to add quotes around unquoted keys and values
-    def add_quotes(match):
-        key, value = match.groups()
-        # Wrap the key in quotes
-        key = f"'{key}'"
-        # Wrap the value in quotes if it's not a list or nested structure
-        if not re.match(r"[\[{]", value):  # Skip lists or nested structures
-            value = f"'{value}'"
-        return f"{key}={value}"
-
-    # Add quotes to keys and values
-    preprocessed_string = re.sub(r"(\w+)=([^,]+)", add_quotes, input_string)
-
-    # Replace '=' with ':' to mimic a dictionary structure
-    dict_like_string = preprocessed_string.replace("=", ":")
-
-    # Use ast.literal_eval to safely evaluate the string as a dictionary
-    try:
-        parsed_dict = ast.literal_eval(f"{{{dict_like_string}}}")
-    except (ValueError, SyntaxError) as e:
-        raise ValueError(f"Failed to parse the input string: {e}")
-
-    # Process the dictionary to convert lists to NumPy arrays
-    for key, value in parsed_dict.items():
-        if isinstance(value, list):
-            parsed_dict[key] = np.array(value)
-
-    return parsed_dict
-
-def parse_dict_to_string(input_dict: dict) -> str:
-    string = ""
-    for k, v in input_dict.items():
-        string += f"{k}="
-        if isinstance(v, str):
-            string += f"{v}, "
-        elif isinstance(v, np.ndarray):
-            string += f"{v.tolist()}, "
-    return string
-
 def read_h5_file(h5_filepath: str):
+    def load(s):
+        d: dict = json.loads(s)
+        for k, v in d.items():
+            try:
+                if isinstance(v, list):
+                    d[k] = np.array(v)
+            except:
+                pass
+        return d
+    
     with h5py.File(h5_filepath, 'r') as h5f:
         all_coords       = h5f['coordinates'] [:]
         all_atom_types   = h5f['atom_types']  [:].astype("U")
-        all_info_strings = h5f['info_strings'][:].astype("U")
-    return all_coords, all_atom_types, all_info_strings
+        
+        # Convert JSON strings back to list of dicts
+        all_info_dicts_json = h5f['info_dicts'][:]
+        if isinstance(all_info_dicts_json[0], bytes):
+            all_info_dicts_json = [s.decode('utf-8') for s in all_info_dicts_json]
+        all_info_dicts = [load(s) for s in all_info_dicts_json]
+        
+        extra_data = {}
+        for k in h5f.keys():
+            if k not in ['coordinates', 'atom_types', 'info_dicts']:
+                try:
+                    v = h5f[k][:]
+                    if isinstance(v, np.ndarray):
+                        v = v.astype("U")
+                    extra_data[k] = v
+                except:
+                    extra_data[k] = h5f[k][()].decode('utf-8')
 
-def write_h5_file(h5_filepath: str, all_coords: np.ndarray, all_atom_types: np.ndarray, all_info_strings: np.ndarray):
+    return all_coords, all_atom_types, all_info_dicts, extra_data
+
+def write_h5_file(
+    h5_filepath: str,
+    all_coords: np.ndarray,
+    all_atom_types: np.ndarray,
+    all_info_dicts: Union[dict, list[dict]],
+    **kwargs
+):
     with h5py.File(h5_filepath, 'w') as h5f:
-        h5f.create_dataset('coordinates',  data=all_coords)
-        h5f.create_dataset('atom_types',   data=all_atom_types.astype(np.string_))
-        h5f.create_dataset('info_strings', data=all_info_strings.astype(np.string_))
+        h5f.create_dataset('coordinates', data=all_coords)
+        h5f.create_dataset('atom_types',  data=all_atom_types.astype(np.string_))
+        
+        # Convert list of dicts to JSON strings
+        if isinstance(all_info_dicts, list):
+            all_info_dicts_json = [json.dumps(d) for d in all_info_dicts]
+            h5f.create_dataset('info_dicts', data=np.array(all_info_dicts_json, dtype=np.string_))
+        else:
+            h5f.create_dataset('info_dicts', data=json.dumps(all_info_dicts))
+        
+        for k, v in kwargs.items():
+            if isinstance(v, np.ndarray):
+                 h5f.create_dataset(k, data=v.astype(np.string_))
+            else:
+                h5f.create_dataset(k, data=json.dumps(v))

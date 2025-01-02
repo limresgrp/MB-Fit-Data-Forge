@@ -70,43 +70,42 @@ def fix_single_mol(elements, coords, atypes, bond_idcs) -> Mol:
 
 def fix_bonds(filename: str):
     natoms = 0
-    filename_fixed = append_suffix_to_filename(filename, "_fixed_bonds")
-    with open(filename_fixed, 'w') as f_out:
-        with open(filename, 'r') as f_in:
-            flag = 'natoms'
-            for line in f_in.readlines():
-                if flag == 'natoms':
+    filename_fixed = append_suffix_to_filename(filename, ".fixed_bonds")
+    with open(filename, 'r') as f_in, open(filename_fixed, 'w') as f_out:
+        flag = 'natoms'
+        for line in f_in.readlines():
+            if flag == 'natoms':
+                natoms = line
+                flag = 'energy'
+            elif flag == 'energy':
+                energies = line
+                flag = 'xyz'
+                elements = []
+                coords = []
+                atypes = []
+                bond_idcs = []
+            else:
+                splits = line.split()
+                if len(splits) == 1:
+                    mol = fix_single_mol(elements, coords, atypes, bond_idcs)
+                    lines = [
+                        str(natoms),
+                        energies,
+                        *mol.rows(),
+                    ]
+                    f_out.writelines(lines)
                     natoms = line
                     flag = 'energy'
-                elif flag == 'energy':
-                    energies = line
-                    flag = 'xyz'
-                    elements = []
-                    coords = []
-                    atypes = []
-                    bond_idcs = []
                 else:
-                    splits = line.split()
-                    if len(splits) == 1:
-                        mol = fix_single_mol(elements, coords, atypes, bond_idcs)
-                        lines = [
-                            str(natoms),
-                            energies,
-                            *mol.rows(),
-                        ]
-                        f_out.writelines(lines)
-                        natoms = line
-                        flag = 'energy'
-                    else:
-                        elements.append(splits[0])
-                        coords.append(np.array([float(x) for x in splits[1:4]]))
-                        atypes.append(splits[4])
-                        bond_idcs.append([int(x) for x in splits[5:]])
-            mol = fix_single_mol(elements, coords, atypes, bond_idcs)
-            lines = [
-                str(natoms),
-                energies,
-                *mol.rows(),
-            ]
-            f_out.writelines(lines)
+                    elements.append(splits[0])
+                    coords.append(np.array([float(x) for x in splits[1:4]]))
+                    atypes.append(splits[4])
+                    bond_idcs.append([int(x) for x in splits[5:]])
+        mol = fix_single_mol(elements, coords, atypes, bond_idcs)
+        lines = [
+            str(natoms),
+            energies,
+            *mol.rows(),
+        ]
+        f_out.writelines(lines)
     os.replace(filename_fixed, filename)

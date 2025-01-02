@@ -18,7 +18,7 @@ from dataforge.src import DataDict, intersect_rows_2d, dynamic_for_loop, fix_bon
 from dataforge.src.qchem_utils import prepare_qchem_input
 from dataforge.src.logging import get_logger
 from dataforge.src.nmers import Monomer, Multimer
-from dataforge.src.generic import argofyinx, parse_string_to_dict, parse_dict_to_string, read_h5_file, write_h5_file
+from dataforge.src.generic import argofyinx, read_h5_file, write_h5_file
 
 
 # Create a global lock
@@ -103,17 +103,17 @@ def build_nmers(
 
     automatic_sampling = not all(v is None for v in nmer_sampling_conf.values())
 
-    build_xyz_nmers(
-        traj_dataset_filename   = input_filename,
-        data_root               = DATA_ROOT,
-        nmers_root              = NMERS_ROOT,
-        monomers_dict           = DataDict.MONOMERS_DICT,
-        nmer_sampling_conf      = nmer_sampling_conf,
-        logger                  = logger,
-        keep_only_monomer_names = keep_only_monomer_names,
-        compute_descriptors     = automatic_sampling,
-        max_processes           = max_processes,
-    )
+    # build_xyz_nmers(
+    #     traj_dataset_filename   = input_filename,
+    #     data_root               = DATA_ROOT,
+    #     nmers_root              = NMERS_ROOT,
+    #     monomers_dict           = DataDict.MONOMERS_DICT,
+    #     nmer_sampling_conf      = nmer_sampling_conf,
+    #     logger                  = logger,
+    #     keep_only_monomer_names = keep_only_monomer_names,
+    #     compute_descriptors     = automatic_sampling,
+    #     max_processes           = max_processes,
+    # )
 
     build_xyz_capped_nmers(
         nmers_root              = NMERS_ROOT,
@@ -152,7 +152,7 @@ def build_xyz_nmers(
     # ---------------------------------------------------------------- #
 
     if not os.path.exists(data_root):
-        os.makedirs(data_root)
+        os.makedirs(data_root, exist_ok=True)
 
     logger.info("-- Loading trajectory...")
     traj_dataset = dict(np.load(traj_dataset_filename, allow_pickle=True))
@@ -347,7 +347,7 @@ def save_multimer(
 
     # - Create folder - #
     nmer_folder = os.path.join(nmers_root, folder_name, multimer.name)
-    if not os.path.isdir(nmer_folder): os.makedirs(nmer_folder)
+    if not os.path.isdir(nmer_folder): os.makedirs(nmer_folder, exist_ok=True)
     h5_filename = os.path.join(nmer_folder, multimer.h5_filename)
     if os.path.isfile(h5_filename): logger.warning(f"File {h5_filename} exists alreeady. Overwriting...")
     if multimer_sampled_indices is None: multimer_sampled_indices = np.arange(len(orig_pos))
@@ -355,12 +355,12 @@ def save_multimer(
     # Prepare data for saving
     all_coords = []
     all_atom_types = []
-    all_info_strings = []
+    all_info_dicts = []
 
     for xyz, frame_id in zip(orig_pos[multimer_sampled_indices][:, multimer.orig_all_atoms_idcs], multimer_sampled_indices):
         # Index of all monomer atoms, relative to multimer atoms only
         severed_idcs = np.argwhere(np.isin(multimer.orig_all_atoms_idcs,multimer.orig_connected_atoms_idcs)).flatten()
-        info_string = f"fullname=f{str(frame_id)}_{multimer.fullname}"
+        info_dict = {"fullname": f"{str(frame_id)}_{multimer.fullname}"}
         severed_names = np.zeros((len(severed_idcs),), dtype=object)
         severed_bonded_idcs = get_bonded_idcs(severed_idcs, multimer, multimer)
 
@@ -370,25 +370,24 @@ def save_multimer(
             for severed_atom_idx, mocai in enumerate(multimer.orig_connected_atoms_idcs):
                 if mocai in monomer.orig_connected_atoms_idcs:
                     severed_names[severed_atom_idx] = monomer.name
-            info_string += f", monomer_{m_id + 1}_name={monomer.name}"
-            info_string += f", monomer_{m_id + 1}_idcs={monomer_idcs.tolist()}"
-            info_string += f", monomer_{m_id + 1}_bonded_idcs={get_bonded_idcs(monomer_idcs, multimer, monomer).tolist()}"
+            info_dict[f"monomer_{m_id + 1}_name"] = monomer.name
+            info_dict[f"monomer_{m_id + 1}_idcs"]  = monomer_idcs.tolist()
+            info_dict[f"monomer_{m_id + 1}_bonded_idcs"] = get_bonded_idcs(monomer_idcs, multimer, monomer).tolist()
         
-        info_string += f", severed_name={severed_names.tolist()}"
-        info_string += f", severed_idcs={severed_idcs.tolist()}"
-        info_string += f", severed_bonded_idcs={severed_bonded_idcs.tolist()}"
+        info_dict[f"severed_name"] = severed_names.tolist()
+        info_dict[f"severed_idcs"] = severed_idcs.tolist()
+        info_dict[f"severed_bonded_idcs"] = severed_bonded_idcs.tolist()
 
         all_coords.append(xyz)
         all_atom_types.append(orig_all_atom_types[multimer.orig_all_atoms_idcs])
-        all_info_strings.append(info_string)
+        all_info_dicts.append(info_dict)
 
     all_coords = np.array(all_coords)
     all_atom_types = np.array(all_atom_types, dtype=np.string_)
-    all_info_strings = np.array(all_info_strings, dtype=np.string_)
 
     # Save to h5 file
     with lock:
-        write_h5_file(h5_filename, all_coords, all_atom_types, all_info_strings)
+        write_h5_file(h5_filename, all_coords, all_atom_types, all_info_dicts)
 
 def get_bonded_idcs(
     idcs: np.ndarray,
@@ -619,9 +618,8 @@ def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly
         logger.warning(f"File {h5_capped_filepath} exists already. Overwriting...")
 
     # Load the H5 file saved in save_multimer
-    all_coords, all_atom_types, all_info_strings = read_h5_file(h5_filepath)
-
-    info_dict = parse_string_to_dict(all_info_strings[0])
+    all_coords, all_atom_types, all_info_dicts, _ = read_h5_file(h5_filepath)
+    info_dict = all_info_dicts[0]
 
     # Process the data
     capped_coords, capped_atom_types = substitute_severed_atoms(all_coords, all_atom_types, info_dict)
@@ -638,17 +636,13 @@ def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly
 
     # Save the capped nmers to a new H5 file
 
-    capped_coords = result.get('all_coords')
-    capped_atom_types = result.get('all_atom_types')
-    # capped_all_info_strings = []
-    # for old_info_string in all_info_strings:
-    #     info_dict = parse_string_to_dict(old_info_string)
-    #     info_string = parse_dict_to_string(info_dict)
-    #     capped_all_info_strings.append(info_string)
-    # capped_all_info_strings = np.array(capped_all_info_strings)
+    capped_coords = result.pop('all_coords')
+    capped_atom_types = result.pop('all_atom_types')
+    result.pop('symmetry_names_argsort')
+    all_info_dicts = [{k: v for k, v in info_dict.items() if k == 'fullname'} for info_dict in all_info_dicts]
 
     with lock:
-        write_h5_file(h5_capped_filepath, capped_coords, capped_atom_types, all_info_strings)
+        write_h5_file(h5_capped_filepath, capped_coords, capped_atom_types, all_info_dicts, **result)
 
 def save_poly_generator(data: dict, poly_generator_filename: str, logger: Logger):
     poly_generator_folder = dirname(poly_generator_filename)
@@ -659,7 +653,7 @@ def save_poly_generator(data: dict, poly_generator_filename: str, logger: Logger
     # Create folder for code generating polynomials
     if not os.path.exists(poly_generator_filename):
         logger.info(f"--- Writing polynomial generator for {nmer_name} ---")
-        os.makedirs(dirname(poly_generator_filename))
+        os.makedirs(dirname(poly_generator_filename), exist_ok=True)
     
     # Read poly_generator python code template
     current_dir = Path(__file__).parent
