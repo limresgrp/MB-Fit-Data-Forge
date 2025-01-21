@@ -21,6 +21,7 @@ setup(
         "console_scripts": [
             "dataforge-parse-traj = dataforge.scripts.parse_traj:main",
             "dataforge-build-nmers = dataforge.scripts.build_nmers:main",
+            "dataforge-fps = dataforge.scripts.fps:main",
             "dataforge-qchem = dataforge.scripts.qchem:main",
         ]
     },
@@ -31,6 +32,7 @@ setup(
         "tqdm",
         "pandas",
         "scikit-learn",
+        "scikit-learn-extra",
         "MDAnalysis",
     ],
     zip_safe=True,

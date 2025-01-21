@@ -109,18 +109,18 @@ def read_h5_file(h5_filepath: str):
         return d
     
     with h5py.File(h5_filepath, 'r') as h5f:
-        all_coords       = h5f['coordinates'] [:]
-        all_atom_types   = h5f['atom_types']  [:].astype("U")
+        coords     = h5f['coords']    [:]
+        atom_types = h5f['atom_types'][:].astype("U")
+        fullnames  = h5f['fullnames'] [:].astype("U")
         
-        # Convert JSON strings back to list of dicts
-        all_info_dicts_json = h5f['info_dicts'][:]
-        if isinstance(all_info_dicts_json[0], bytes):
-            all_info_dicts_json = [s.decode('utf-8') for s in all_info_dicts_json]
-        all_info_dicts = [load(s) for s in all_info_dicts_json]
+        info_dict_json = h5f['info_dict'][()]
+        if isinstance(info_dict_json, bytes):
+            info_dict_json = info_dict_json.decode('utf-8')
+        info_dict = load(info_dict_json)
         
         extra_data = {}
         for k in h5f.keys():
-            if k not in ['coordinates', 'atom_types', 'info_dicts']:
+            if k not in ['coords', 'atom_types', 'info_dict']:
                 try:
                     v = h5f[k][:]
                     if isinstance(v, np.ndarray):
@@ -129,25 +129,24 @@ def read_h5_file(h5_filepath: str):
                 except:
                     extra_data[k] = h5f[k][()].decode('utf-8')
 
-    return all_coords, all_atom_types, all_info_dicts, extra_data
+    return coords, atom_types, fullnames, info_dict, extra_data
 
 def write_h5_file(
     h5_filepath: str,
-    all_coords: np.ndarray,
-    all_atom_types: np.ndarray,
-    all_info_dicts: Union[dict, list[dict]],
+    coords: np.ndarray,
+    atom_types: np.ndarray,
+    fullnames: np.ndarray,
+    info_dict: dict,
     **kwargs
 ):
     with h5py.File(h5_filepath, 'w') as h5f:
-        h5f.create_dataset('coordinates', data=all_coords)
-        h5f.create_dataset('atom_types',  data=all_atom_types.astype(np.string_))
+        h5f.create_dataset('coords',     data=coords)
+        h5f.create_dataset('atom_types', data=atom_types.astype(np.string_))
+        h5f.create_dataset('fullnames',  data=fullnames.astype(np.string_))
         
-        # Convert list of dicts to JSON strings
-        if isinstance(all_info_dicts, list):
-            all_info_dicts_json = [json.dumps(d) for d in all_info_dicts]
-            h5f.create_dataset('info_dicts', data=np.array(all_info_dicts_json, dtype=np.string_))
-        else:
-            h5f.create_dataset('info_dicts', data=json.dumps(all_info_dicts))
+        # Convert info_dict to JSON string and save it
+        info_dict_json = json.dumps(info_dict)
+        h5f.create_dataset('info_dict', data=info_dict_json)
         
         for k, v in kwargs.items():
             if isinstance(v, np.ndarray):

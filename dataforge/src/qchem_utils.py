@@ -29,8 +29,7 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
     os.makedirs(qchem_in_root_folder, exist_ok=True)
     
     # Load the H5 file saved in save_multimer
-    all_coords, all_atom_types, all_info_dicts, extra_info = read_h5_file(h5_filepath)
-    all_fullnames = np.array([d['fullname'] for d in all_info_dicts])
+    coords, atom_types, fullnames, _, extra_info = read_h5_file(h5_filepath)
     in_nmer_folder = basename(dirname(h5_filepath))
     
     charge = 0
@@ -44,7 +43,7 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
     frame_filter = None
     if frame_filter is None:
         frame_filter = np.arange(10)#len(all_coords))
-    for coords, atom_types, fullname in zip(all_coords[frame_filter], all_atom_types[frame_filter], all_fullnames[frame_filter]):
+    for coords, atom_types, fullname in zip(coords[frame_filter], atom_types[frame_filter], fullnames[frame_filter]):
         splits = fullname.split('_')
         frame_id = splits[0]
         monomer_idcs = splits[-int(extra_info.get("num_monomers")):]
