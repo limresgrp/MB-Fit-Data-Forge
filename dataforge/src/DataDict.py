@@ -10,7 +10,7 @@ FOLDER_NAMES = {
 }
 
 ATOM_TYPE_TO_H_DISTANCE = {
-    'C': 1.086, # 1.086 C-HG, 1.092 HG-C=OO, 1.08 C=C-H
+    'C': 1.086, # 1.086 C-HG, 1.092 HG-C=OO, 1.08 C=C-HG
     'N': 1.022, # 1.022 N-HG,
     'O': 0.963, # 0.963 O-HG,
 }
