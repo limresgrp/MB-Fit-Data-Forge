@@ -29,7 +29,7 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
     os.makedirs(qchem_in_root_folder, exist_ok=True)
     
     # Load the H5 file saved in save_multimer
-    coords, atom_types, fullnames, _, extra_info = read_h5_file(h5_filepath)
+    all_coords, atom_types, fullnames, _, extra_info = read_h5_file(h5_filepath)
     in_nmer_folder = basename(dirname(h5_filepath))
     
     charge = 0
@@ -40,10 +40,13 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
             charge += ch
     multiplicity = 1
 
-    frame_filter = None
-    if frame_filter is None:
-        frame_filter = np.arange(10)#len(all_coords))
-    for coords, atom_types, fullname in zip(coords[frame_filter], atom_types[frame_filter], fullnames[frame_filter]):
+    list_filepath = h5_filepath.replace('.h5', '.list')
+    if os.path.exists(list_filepath):
+        with open(list_filepath, 'r') as f:
+            frame_filter = np.array([int(line.strip()) for line in f], dtype=int)
+    else:
+        frame_filter = np.arange(len(all_coords))
+    for coords, fullname in zip(all_coords[frame_filter], fullnames[frame_filter]):
         splits = fullname.split('_')
         frame_id = splits[0]
         monomer_idcs = splits[-int(extra_info.get("num_monomers")):]
@@ -54,9 +57,7 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
         input_file = BLUEPRINT_1
         input_file += f"{charge} {multiplicity}\n"
 
-        for line in [
-            f'{atom_type} {" ".join([str(x) for x in pos])}\n' for atom_type, pos in zip(atom_types, coords)
-        ]:
+        for line in [f'{atom_type} {" ".join([str(x) for x in pos])}\n' for atom_type, pos in zip(atom_types, coords)]:
             input_file += line
         input_file += BLUEPRINT_2
         

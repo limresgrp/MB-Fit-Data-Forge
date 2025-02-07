@@ -1,6 +1,8 @@
+import functools
 import os
 import glob
 import argparse
+from typing import Callable
 import numpy as np
 from itertools import permutations, product
 from sklearn_extra.cluster import KMedoids
@@ -24,6 +26,7 @@ def apply_permutation(coords, perm):
     return permuted_coords
 
 def compute_frame_permutations(coords, symmetric_permutations):
+    print("Computing permuted coordinates")
     all_permuted_coords = []
     for perm in symmetric_permutations:
         permuted_coords = coords.copy()
@@ -33,6 +36,7 @@ def compute_frame_permutations(coords, symmetric_permutations):
     return np.stack(all_permuted_coords, axis=1)
 
 def compute_pairwise_distances(A):
+    print("Computing atoms pairwise distances")
     _, _, atoms, _ = A.shape
     # Compute the pairwise differences
     diff = A[:, :, :, np.newaxis, :] - A[:, :, np.newaxis, :, :]
@@ -40,88 +44,80 @@ def compute_pairwise_distances(A):
     dist_squared = np.sum(diff**2, axis=-1)
     # Extract the lower triangular part of the distance matrix (excluding the diagonal)
     i_lower = np.tril_indices(atoms, -1)
-    distance_matrix = dist_squared[:, :, i_lower[0], i_lower[1]]
+    descriptors_squared = dist_squared[:, :, i_lower[0], i_lower[1]]
     # Take the square root to get the Euclidean distances
-    distance_matrix = np.sqrt(distance_matrix)
-    return distance_matrix
+    return np.sqrt(descriptors_squared)
 
-def compute_distance_between_frames(coords1, coords2):
-    diff = coords1[:, np.newaxis, :] - coords2[:, np.newaxis, :, :]
+def compute_distance_between_frames(descriptors1, descriptors2):
+    diff = descriptors1[:, np.newaxis, :] - descriptors2[:, np.newaxis, :, :]
     # Compute the squared distances
     dist_squared = np.sum(diff**2, axis=-1)
     return dist_squared.min(axis=2).min(axis=1)
 
-def compute_distance(i, descriptors):
-    return i, compute_distance_between_frames(descriptors[i, :1], descriptors[i+1:])
+def compute_permutation_invariant_distance(point_idx, descriptors):
+    return compute_distance_between_frames(descriptors[point_idx, :1], descriptors)
 
-def compute_all_distances(coords, names, max_symm_perm=100, max_processes=1):
+def fps(num_points: int, num_samples: int, compute_distance: Callable):
+    assert num_samples < num_points, "The number of samples must be less than the number of points"
+    
+    # Initialize the array of minimum distances to the selected points
+    min_distances = np.ones(num_points, dtype=np.float16) * np.inf
+    # Initialize the list of selected points with the medoids
+    selected_points = []
+
+    def add_point(point):
+        selected_points.append(point)
+        min_distances[point] = 0.
+    
+    def update_min_distances(min_distances, farthest_point):
+        distances_from_point = compute_distance(farthest_point)
+        return np.minimum(min_distances, distances_from_point)
+
+    farthest_point = np.random.randint(0, num_points)
+    add_point(farthest_point)
+    
+    print("Start FPS")
+    for i in range(len(selected_points), num_samples):
+        # Compute distance of all points from newly sampled point and update min_distances array
+        min_distances = update_min_distances(min_distances, farthest_point)
+
+        # Find the point that is farthest from the selected points
+        farthest_point = np.argmax(min_distances)
+        add_point(farthest_point)
+        if (i+1)%(num_samples//10) == 0:
+            print(f"{i+1}/{num_samples} points sampled")
+    print(f"{num_samples} points sampled!")
+    
+    return np.array(selected_points)
+
+def furthest_point_sampling(num_samples, coords, names, chunk_max_dim=10000, max_symm_perm=100):
+    points = np.arange(len(coords))
     print("Generating permutations")
     perm_dict = generate_permutations(names)
     symmetric_permutations = [[x for x in perm if len(x) > 1] for perm in product(*perm_dict.values())]
     if len(symmetric_permutations) > max_symm_perm:
         import random
         symmetric_permutations = random.sample(symmetric_permutations, max_symm_perm)
-    print("Computing permuted coordinates")
-    permuted_coords = compute_frame_permutations(coords, symmetric_permutations)
-    print("Computing symmetry-aware pairwise distances")
-    permuted_distances = compute_pairwise_distances(permuted_coords)
-    n_frames = coords.shape[0]
-    distances = np.zeros((n_frames, n_frames))
+    
+    def select_points(coords, symmetric_permutations):
+        permuted_coords = compute_frame_permutations(coords, symmetric_permutations)
+        descriptors = compute_pairwise_distances(permuted_coords)
+        compute_distance_func = functools.partial(compute_permutation_invariant_distance, descriptors=descriptors)
+        num_points = len(coords)
+        return fps(num_points, num_samples, compute_distance_func)
 
-    print("Computing frame distances")
-    if max_processes > 1:
-        with Pool(processes=max_processes) as pool:
-            results = pool.starmap(compute_distance, [(i, permuted_distances) for i in range(n_frames)])
-    else:
-        results = [compute_distance(i, permuted_distances) for i in range(n_frames)]
-
-    for i, dist in results:
-        distances[i, i+1:] = dist
-        distances[i+1:, i] = dist
-
-    return distances
-
-def furthest_point_sampling(num_samples, coords, names, chunk_max_dim=10000, max_symm_perm=100, max_processes=1, n_clusters=10):
-    def fps(M, N):
-        num_points = M.shape[0]
-        assert N < num_points, "N must be less than the number of points in M"
-        
-        # Perform K-medoids clustering to get initial medoids
-        k = min(N, n_clusters)  # Number of initial points to select using K-medoids
-        kmedoids = KMedoids(n_clusters=k, metric='precomputed', random_state=0).fit(M)
-        medoids = kmedoids.medoid_indices_
-        
-        # Initialize the list of selected points with the medoids
-        selected_points = list(medoids)
-        
-        # Initialize the array of minimum distances to the selected points
-        min_distances = np.min(M[selected_points, :], axis=0)
-        
-        for _ in range(len(selected_points), N):
-            # Find the point that is farthest from the selected points
-            farthest_point = np.argmax(min_distances)
-            selected_points.append(farthest_point)
-            
-            # Update the minimum distances to the selected points
-            min_distances = np.minimum(min_distances, M[farthest_point, :])
-        
-        return np.array(selected_points)
-
-    points = np.arange(len(coords))
     while len(coords) > chunk_max_dim:
         print(f"Number of points ({len(coords)}) exceeds the maximum chunk size ({chunk_max_dim}). Splitting into chunks.")
         num_chunks = int(np.ceil(len(coords) / chunk_max_dim))
         chunk_size = len(coords) // num_chunks
-        chunks = [coords[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
-        
+        chunks_coords = [coords[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
         all_selected_points = []
         offset = 0
-        for i, chunk in enumerate(chunks):
+        for i, chunk_coords in enumerate(chunks_coords):
             print(f"Processing chunk {i+1}/{num_chunks}")
-            distance_matrix = compute_all_distances(chunk, names, max_symm_perm=max_symm_perm, max_processes=max_processes)
-            selected_points = fps(distance_matrix, min(num_samples, len(chunk))) + offset
+            selected_points = select_points(chunk_coords, symmetric_permutations) + offset
             all_selected_points.extend(selected_points)
-            offset += len(chunk)
+            offset += len(chunk_coords)
         
         print(f"Selected {len(all_selected_points)} overall points from all chunks")
         points = points[all_selected_points]
@@ -129,8 +125,7 @@ def furthest_point_sampling(num_samples, coords, names, chunk_max_dim=10000, max
     
     # Perform FPS on the final set of coordinates
     print("Performing FPS on the final set of coordinates")
-    distance_matrix = compute_all_distances(coords, names, max_symm_perm=max_symm_perm, max_processes=max_processes)
-    final_selected_points = fps(distance_matrix, num_samples)
+    final_selected_points = select_points(coords, symmetric_permutations)
     
     return np.sort(points[final_selected_points])
 
@@ -138,12 +133,10 @@ def get_list_filename(h5_filename):
     base, _ = os.path.splitext(h5_filename)
     return base + '.list'
 
-def process_h5_file(h5_filename, n_samples, chunk_max_dim, max_symm_perm, max_processes):
+def process_h5_file(h5_filename, n_samples, chunk_max_dim, max_symm_perm):
     coords, atom_types, fullnames, info_dict, extra_data = read_h5_file(h5_filename)
     names = extra_data['symmetry_names_sorted']
-
-    sampled_indices = furthest_point_sampling(n_samples, coords, names, chunk_max_dim=chunk_max_dim, max_symm_perm=max_symm_perm, max_processes=max_processes)
-
+    sampled_indices = furthest_point_sampling(n_samples, coords, names, chunk_max_dim=chunk_max_dim, max_symm_perm=max_symm_perm)
     output_filepath = get_list_filename(h5_filename)
     np.savetxt(output_filepath, sampled_indices, fmt='%d')
 
@@ -159,7 +152,7 @@ def main():
     Command-line arguments:
     h5_foldername (str): Path to the folder containing H5 files.
     n_samples (int): Number of samples to select.
-    -c, --chunk_max_dim (int, optional): Maximum dimension of each chunk (default: 5000).
+    -c, --chunk_max_dim (int, optional): Maximum dimension of each chunk (default: 1e9).
     -s, --max_symm_perm (int, optional): Maximum number of symmetric permutations evaluated (default: 100).
     -p, --max_processes (int, optional): Maximum number of processes to use (default: 1).
 
@@ -171,9 +164,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run FPS on H5 files in a folder.")
     parser.add_argument("h5_foldername", type=str, help="Path to the folder containing H5 files.")
     parser.add_argument("n_samples", type=int, help="Number of samples to select.")
-    parser.add_argument("-c", "--chunk_max_dim", type=int, default=10000, help="Maximum dimension of each chunk (default: 5000).")
+    parser.add_argument("-c", "--chunk_max_dim", type=int, default=1e9, help="Maximum dimension of each chunk (default: 1e9).")
     parser.add_argument("-s", "--max_symm_perm", type=int, default=100, help="Maximum number of symmetric permutations evaluated (default: 100).")
-    parser.add_argument("-p", "--max_processes", type=int, default=1, help="Maximum number of processes to use (default: 1).")
+    parser.add_argument("-p", "--max_processes", type=int, default=64, help="Maximum number of processes to use (default: 64).")
 
     args = parser.parse_args()
 
@@ -183,11 +176,12 @@ def main():
     max_symm_perm = args.max_symm_perm
     max_processes = args.max_processes
 
+    process_h5_file_func = functools.partial(process_h5_file, n_samples=n_samples, chunk_max_dim=chunk_max_dim, max_symm_perm=max_symm_perm)
     h5_filepaths = glob.glob(os.path.join(h5_foldername, "**/*.h5"), recursive=True)
 
-    for h5_filepath in h5_filepaths:
-        print(f"Processing {h5_filepath}...")
-        process_h5_file(h5_filepath, n_samples, chunk_max_dim, max_symm_perm, max_processes)
+    with Pool(processes=min(max_processes, len(h5_filepaths))) as pool:
+        pool.map(process_h5_file_func, h5_filepaths)
+
 
 if __name__ == "__main__":
     main()
