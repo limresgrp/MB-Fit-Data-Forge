@@ -7,6 +7,7 @@ import numpy as np
 from itertools import permutations, product
 from sklearn_extra.cluster import KMedoids
 from multiprocessing import Pool
+from dataforge.src import DataDict
 from dataforge.src.generic import read_h5_file
 
 def generate_permutations(names):
@@ -139,6 +140,44 @@ def process_h5_file(h5_filename, n_samples, chunk_max_dim, max_symm_perm):
     sampled_indices = furthest_point_sampling(n_samples, coords, names, chunk_max_dim=chunk_max_dim, max_symm_perm=max_symm_perm)
     output_filepath = get_list_filename(h5_filename)
     np.savetxt(output_filepath, sampled_indices, fmt='%d')
+    update_lower_degree_nmer_sampled_idcs(output_filepath)
+
+def get_root_folder(filename, root_folders):
+    for part in reversed(filename.split('/')):
+        if part in root_folders:
+            return part
+    raise ValueError("Root folder not found in filename")
+
+def update_lower_degree_nmer_sampled_idcs(filename):
+    print(f"Updating sampled indices list of lower degree nmers for {filename}...")
+
+    # Define the root folders
+    root_folders = list(DataDict.FOLDER_NAMES.values())
+
+    # Extract the root folder from the filename
+    root_folder = get_root_folder(filename, root_folders)
+    sampled_indices = np.loadtxt(filename, dtype=int)
+    root_folder2num_monomers = {v: k for k, v in DataDict.FOLDER_NAMES.items()}
+    nmers_idcs = os.path.basename(filename).split('.')[-2].split('_')[-root_folder2num_monomers[root_folder]:]
+
+    # Get the base directory
+    base_dir = filename.split(root_folder)[0] + root_folder
+
+    # Find subfolders and files
+    for subfolder in os.listdir(base_dir):
+        subfolder_path = os.path.join(base_dir, subfolder)
+        if os.path.isdir(subfolder_path) and subfolder in root_folders:
+            for file in glob.glob(os.path.join(subfolder_path, '**/*.h5'), recursive=True):
+                    file_nmers_idcs = os.path.basename(file).split('.')[-2].split('_')[-root_folder2num_monomers[get_root_folder(file, root_folders)]:]
+                    if any(idx in file_nmers_idcs for idx in nmers_idcs):
+                        list_file = file.replace('.h5', '.list')
+                        list_file_path = os.path.join(subfolder_path, list_file)
+                        if os.path.exists(list_file_path):
+                            existing_indices = np.loadtxt(list_file_path, dtype=int)
+                            updated_indices = np.unique(np.concatenate((existing_indices, sampled_indices)))
+                            np.savetxt(list_file_path, updated_indices, fmt='%d')
+                        else:
+                            np.savetxt(list_file_path, sampled_indices, fmt='%d')
 
 def main():
     """
@@ -176,11 +215,21 @@ def main():
     max_symm_perm = args.max_symm_perm
     max_processes = args.max_processes
 
+    print(f"Processing H5 files in folder: {h5_foldername}")
+    print(f"Number of samples to select: {n_samples}")
+    print(f"Maximum dimension of each chunk: {chunk_max_dim}")
+    print(f"Maximum number of symmetric permutations evaluated: {max_symm_perm}")
+    print(f"Maximum number of processes to use: {max_processes}")
+
     process_h5_file_func = functools.partial(process_h5_file, n_samples=n_samples, chunk_max_dim=chunk_max_dim, max_symm_perm=max_symm_perm)
     h5_filepaths = glob.glob(os.path.join(h5_foldername, "**/*.h5"), recursive=True)
 
-    with Pool(processes=min(max_processes, len(h5_filepaths))) as pool:
-        pool.map(process_h5_file_func, h5_filepaths)
+    if max_processes <= 1:
+        for h5_filepath in h5_filepaths:
+            process_h5_file_func(h5_filepath)
+    else:
+        with Pool(processes=min(max_processes, len(h5_filepaths))) as pool:
+            pool.map(process_h5_file_func, h5_filepaths)
 
 
 if __name__ == "__main__":
