@@ -1,3 +1,4 @@
+import functools
 from logging import Logger
 import multiprocessing
 import os
@@ -24,12 +25,22 @@ $end
 ```'''
 
 
-def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: str, charges_dict: dict):
+def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: str, charges_dict: dict, skip_if_not_frame_filter=True):
+
+    list_filepath = h5_filepath.replace('.h5', '.list')
+    if os.path.exists(list_filepath):
+        with open(list_filepath, 'r') as f:
+            frame_filter = np.array([int(line.strip()) for line in f], dtype=int)
+    else:
+        if skip_if_not_frame_filter:
+            return
+        frame_filter = np.arange(len(all_coords))
+    
     qchem_in_root_folder = dirname(h5_filepath).replace(nmers_capped_root, qchem_in_root)
     os.makedirs(qchem_in_root_folder, exist_ok=True)
     
     # Load the H5 file saved in save_multimer
-    all_coords, atom_types, fullnames, _, extra_info = read_h5_file(h5_filepath)
+    all_coords, atom_types, fullnames, _, extra_info = read_h5_file(h5_filepath, rows_filter=frame_filter)
     in_nmer_folder = basename(dirname(h5_filepath))
     
     charge = 0
@@ -40,13 +51,8 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
             charge += ch
     multiplicity = 1
 
-    list_filepath = h5_filepath.replace('.h5', '.list')
-    if os.path.exists(list_filepath):
-        with open(list_filepath, 'r') as f:
-            frame_filter = np.array([int(line.strip()) for line in f], dtype=int)
-    else:
-        frame_filter = np.arange(len(all_coords))
-    for coords, fullname in zip(all_coords[frame_filter], fullnames[frame_filter]):
+    print(f"Writing QChem input files for {h5_filepath}...")
+    for coords, fullname in zip(all_coords, fullnames):
         splits = fullname.split('_')
         frame_id = splits[0]
         monomer_idcs = splits[-int(extra_info.get("num_monomers")):]
@@ -84,6 +90,7 @@ def prepare_qchem_input(
         charges_dict: dict,
         logger: Logger = None,
         max_processes: int = 4,
+        skip_if_not_frame_filter: bool = True,
 ):
     if logger is None:
         import logging
@@ -92,13 +99,20 @@ def prepare_qchem_input(
     logger.info("- Preparing QChem input files...")
 
     h5_filepaths = list(glob.iglob(os.path.join(nmers_capped_root, "**/*.h5"), recursive=True))
+    func = functools.partial(
+        write_qchem_input,
+        nmers_capped_root=nmers_capped_root,
+        qchem_in_root=qchem_in_root,
+        charges_dict=charges_dict,
+        skip_if_not_frame_filter=skip_if_not_frame_filter,
+    )
     if max_processes > 0:
         with multiprocessing.Pool(processes=max_processes) as pool:
-            pool.starmap(write_qchem_input, [(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict) for h5_filepath in h5_filepaths])
+            pool.map(func, [h5_filepath for h5_filepath in h5_filepaths])
         pool.join()
     else:
         for h5_filepath in h5_filepaths:
-            write_qchem_input(h5_filepath, nmers_capped_root, qchem_in_root, charges_dict)
+            func(h5_filepath)
     
     def get_inp_files(qchem_in_root):
         h5_filepaths = []

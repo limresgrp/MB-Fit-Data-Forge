@@ -97,7 +97,8 @@ def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: i
     # Apply the pass n times using reduce over the string
     return reduce(lambda acc, _: apply_once(acc), range(n), input_string)
 
-def read_h5_file(h5_filepath: str):
+def read_h5_file(h5_filepath: str, rows_filter: np.ndarray | None = None):
+    print(f"Reading {h5_filepath} file")
     def load(s):
         d: dict = json.loads(s)
         for k, v in d.items():
@@ -109,9 +110,17 @@ def read_h5_file(h5_filepath: str):
         return d
     
     with h5py.File(h5_filepath, 'r') as h5f:
-        coords     = h5f['coords']    [:]
-        atom_types = h5f['atom_types'][:].astype("U")
-        fullnames  = h5f['fullnames'] [:].astype("U")
+        _coords    = h5f['coords']
+        _fullnames = h5f['fullnames']
+        if rows_filter is not None:
+            coords    = _coords   [rows_filter, :, :]
+            fullnames = _fullnames[rows_filter].astype("U")
+        else:
+            coords    = _coords   [:]
+            fullnames = _fullnames[:].astype("U")
+        
+        _atom_types = h5f['atom_types']
+        atom_types = _atom_types[:].astype("U")
         
         info_dict_json = h5f['info_dict'][()]
         if isinstance(info_dict_json, bytes):
@@ -120,7 +129,7 @@ def read_h5_file(h5_filepath: str):
         
         extra_data = {}
         for k in h5f.keys():
-            if k not in ['coords', 'atom_types', 'info_dict']:
+            if k not in ['coords', 'atom_types', 'fullnames', 'info_dict']:
                 try:
                     v = h5f[k][:]
                     if isinstance(v, np.ndarray):
