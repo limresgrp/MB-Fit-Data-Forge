@@ -23,26 +23,41 @@ from dataforge.src.generic import argofyinx, read_h5_file, write_h5_file
 def main(args=None):
     args = parse_command_line(args)
 
-    build_nmers(
-        input_filename          = args.input,
-        dataset_root            = args.root,
-        nmer_sampling_conf      = args.order,
-        keep_only_monomer_names = args.keep,
-        max_processes           = args.max_processes,
-    )
+    if args.mode == 'build':
+        build_nmers(
+            input_filename          = args.input,
+            dataset_root            = args.root,
+            nmer_sampling_conf      = args.order,
+            keep_only_monomer_names = args.keep,
+            max_processes           = args.max_processes,
+            suffix                  = args.suffix,
+        )
+    elif args.mode == 'prepare_qchem':
+        prepare_qchem(
+            dataset_root            = args.root,
+            suffix                  = args.suffix,
+            max_processes           = args.max_processes,
+        )
 
 def parse_command_line(args=None):
     parser = argparse.ArgumentParser(
         description="""
         Read one or more trajectory files, filter and group the molecule of interest
-        and savs the information as a npz dataset file.
+        and save the information as a npz dataset file.
     """
+    )
+    parser.add_argument(
+        "-m",
+        "--mode",
+        choices=['build', 'prepare_qchem'],
+        help="Mode of operation: 'build' to build nmers, 'prepare_qchem' to prepare QChem input files.",
+        required=True,
     )
     parser.add_argument(
         "-i",
         "--input",
-        help="The `.npz` file saved in the previous step.",
-        required=True,
+        help="The `.npz` file saved in the previous step (required for 'build' mode).",
+        required=False,
     )
     parser.add_argument(
         "-r",
@@ -55,7 +70,7 @@ def parse_command_line(args=None):
         "--order",
         nargs='+',
         help="Ordered list of integers, indicating the order of multimers to be built (1=monomer, 2=dimers, ...).",
-        required=True,
+        required=False,
     )
     parser.add_argument(
         "-k",
@@ -65,9 +80,15 @@ def parse_command_line(args=None):
         default=None,
     )
     parser.add_argument(
-        "-m",
+        "-s",
+        "--suffix",
+        help="Suffix to append to the paths for capped nmers, QChem input, and QChem min input.",
+        default="",
+    )
+    parser.add_argument(
+        "-p",
         "--max-processes",
-        help="Maximum number of processes to use for building the nmers.",
+        help="Maximum number of processes to use.",
         type=int,
         default=0,
     )
@@ -80,18 +101,19 @@ def build_nmers(
     nmer_sampling_conf: Union[List[int], Dict[int, int]],
     keep_only_monomer_names: Optional[List[str]] = None,
     max_processes: int = 0,
+    suffix: str = "",
     **kwargs
 ):
     logger = get_logger('02_build_nmers.log', level=logging.DEBUG)
     
     DATA_ROOT         =  join(dataset_root, "data"           )
-    NMERS_ROOT        =  join(DATA_ROOT   , "xyz"            )
-    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     )
-    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    )
-    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input")
+    NMERS_ROOT        =  join(DATA_ROOT   , "xyz"            + suffix)
+    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     + suffix)
+    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    + suffix)
+    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input"+ suffix)
 
-    FIT_ROOT           =                                          join(dataset_root, "fitting")
-    FIT_POLY_ROOT      = kwargs.get('FIT_POLY_ROOT',     None) or join(FIT_ROOT    , "poly"   )
+    FIT_ROOT           =                                          join(dataset_root, "fitting" + suffix)
+    FIT_POLY_ROOT      = kwargs.get('FIT_POLY_ROOT',     None) or join(FIT_ROOT    , "poly"    + suffix)
 
     if isinstance(nmer_sampling_conf, list):
         nmer_sampling_conf = {int(k): None for k in nmer_sampling_conf}
@@ -121,6 +143,27 @@ def build_nmers(
     if not automatic_sampling:
         return
     
+    prepare_qchem_input(
+        nmers_capped_root       = NMERS_CAPPED_ROOT,
+        qchem_in_root           = QCHEM_IN_ROOT,
+        qchem_min_in_root       = QCHEM_MIN_IN_ROOT,
+        charges_dict            = DataDict.CHARGES_DICT,
+        max_processes           = max_processes,
+    )
+    logger.info("- Complete!")
+
+def prepare_qchem(
+    dataset_root: str,
+    suffix: str = "",
+    max_processes: int = 0,
+):
+    logger = get_logger('02_prepare_qchem.log', level=logging.DEBUG)
+    
+    DATA_ROOT         =  join(dataset_root, "data"           )
+    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     + suffix)
+    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    + suffix)
+    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input"+ suffix)
+
     prepare_qchem_input(
         nmers_capped_root       = NMERS_CAPPED_ROOT,
         qchem_in_root           = QCHEM_IN_ROOT,
