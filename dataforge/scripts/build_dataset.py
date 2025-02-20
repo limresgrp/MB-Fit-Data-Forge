@@ -175,6 +175,7 @@ def build_energy_dict(
                 col_name = f"monomer_{j}"
                 df_columns.append(col_name)
                 row[col_name] = int(monomer_id)
+            row["subfolder"] = os.path.relpath(dirname(filename), qchem_out_root)
             row = pd.DataFrame([row])
             if nmer_df is None:
                 nmer_df = row
@@ -229,7 +230,7 @@ def build_delta_energies_dict(
         # Associate all energies and minimised energies of monomers with the same name
         deltaEn = pd.merge(
             En, minEn,  how='inner',
-            left_on=['name'] + [f'monomer_{k}' for k in range(k)],
+            left_on  = ['name'] + [f'monomer_{k}' for k in range(k)],
             right_on = ['name'] + [f'monomer_{k}' for k in range(k)],
         )
         deltaEn.drop_duplicates(subset=['name', 'frame_id_x'] + [f'monomer_{k}' for k in range(k)], keep='first', inplace=True, ignore_index=True)
@@ -390,10 +391,11 @@ def build_fitting_dataset(
                     logger.warning(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
                     continue
 
-                all_coords, all_atom_types, all_info_dicts, _ = read_h5_file(nmer_capping_filename)
-                all_fullnames = np.array([d['fullname'] for d in all_info_dicts])
+                all_coords, all_atom_types, all_fullnames, _, _ = read_h5_file(nmer_capping_filename)
 
-                for _, row in nmer_df.iterrows():
+                subfolder = os.path.relpath(dirname(out_filename), fit_dataset_root)
+                subfolder_nmer_df = nmer_df[nmer_df["subfolder"] == subfolder]
+                for _, row in subfolder_nmer_df.iterrows():
                     frame = row.frame_id_x
                     monomers: List[int] = [int(x) for x in [row[f'monomer_{i}'] for i in range(k)]]
                     h5_fullname = f"{frame}_{row['name']}_{'_'.join([str(m) for m in monomers])}"
@@ -436,7 +438,7 @@ def build_fitting_dataset(
 
                     # ---------------- Writing data/dataset file for current nmer ------------------ #
 
-                    atoms = Atoms(positions=all_coords[h5_index], symbols=all_atom_types[h5_index])
+                    atoms = Atoms(positions=all_coords[h5_index], symbols=all_atom_types)
                     atoms.info = {key: val for key, val in zip(["total_energy", "nmer_energy", "binding_energy"], value)}
                     info = f"{value[1]} {value[2]} {h5_fullname}"
                     
@@ -451,9 +453,10 @@ def build_fitting_dataset(
 
                     # ------------------------------------------------------------------------------ #
 
-                append_connection_info_to_xyz_file(xyz_filename=out_filename, fit_poly_folder=dirname(out_filename).replace(fit_dataset_root, fit_poly_root))
-                fix_bonds(out_filename)
-                convert_unit(out_filename, hartrees2kcalmol)
+                if os.path.isfile(out_filename):
+                    append_connection_info_to_xyz_file(xyz_filename=out_filename, fit_poly_folder=dirname(out_filename).replace(fit_dataset_root, fit_poly_root))
+                    fix_bonds(out_filename)
+                    convert_unit(out_filename, hartrees2kcalmol)
                 # ---------------- End iterate xyz_capped files inside nmer folder ----------------- #
                 
                 # save nmer_energy_contrib_df to csv
@@ -466,7 +469,7 @@ def build_fitting_dataset(
                     nmer_energy_contrib_df_kcal = nmer_energy_contrib_df.copy()
                     # Apply the conversion function to specified columns
                     columns_to_convert = ["total_energy", "nmer_energy", "binding_energy"]
-                    nmer_energy_contrib_df_kcal[columns_to_convert] = nmer_energy_contrib_df_kcal[columns_to_convert].applymap(hartrees2kcalmol)
+                    nmer_energy_contrib_df_kcal[columns_to_convert] = nmer_energy_contrib_df_kcal[columns_to_convert].map(hartrees2kcalmol)
                     nmer_energy_contrib_df_kcal.to_csv(nmer_energy_contrib_csv_kcal, index=False)
 
                     # concat nmer_energy_contrib_df to nmer_energy_contrib_df_total

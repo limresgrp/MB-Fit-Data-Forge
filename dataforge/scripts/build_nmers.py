@@ -47,11 +47,9 @@ def parse_command_line(args=None):
     """
     )
     parser.add_argument(
-        "-m",
-        "--mode",
+        "mode",
         choices=['build', 'prepare_qchem'],
         help="Mode of operation: 'build' to build nmers, 'prepare_qchem' to prepare QChem input files.",
-        required=True,
     )
     parser.add_argument(
         "-i",
@@ -109,8 +107,6 @@ def build_nmers(
     DATA_ROOT         =  join(dataset_root, "data"           )
     NMERS_ROOT        =  join(DATA_ROOT   , "xyz"            + suffix)
     NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     + suffix)
-    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    + suffix)
-    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input"+ suffix)
 
     FIT_ROOT           =                                          join(dataset_root, "fitting" + suffix)
     FIT_POLY_ROOT      = kwargs.get('FIT_POLY_ROOT',     None) or join(FIT_ROOT    , "poly"    + suffix)
@@ -140,16 +136,6 @@ def build_nmers(
         max_processes           = max_processes,
     )
 
-    if not automatic_sampling:
-        return
-    
-    prepare_qchem_input(
-        nmers_capped_root       = NMERS_CAPPED_ROOT,
-        qchem_in_root           = QCHEM_IN_ROOT,
-        qchem_min_in_root       = QCHEM_MIN_IN_ROOT,
-        charges_dict            = DataDict.CHARGES_DICT,
-        max_processes           = max_processes,
-    )
     logger.info("- Complete!")
 
 def prepare_qchem(
@@ -159,10 +145,10 @@ def prepare_qchem(
 ):
     logger = get_logger('02_prepare_qchem.log', level=logging.DEBUG)
     
-    DATA_ROOT         =  join(dataset_root, "data"           )
-    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     + suffix)
-    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    + suffix)
-    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input"+ suffix)
+    DATA_ROOT         =  join(dataset_root, "data"                    )
+    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     , suffix)
+    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    , suffix)
+    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input", suffix)
 
     prepare_qchem_input(
         nmers_capped_root       = NMERS_CAPPED_ROOT,
