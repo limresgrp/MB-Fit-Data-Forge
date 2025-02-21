@@ -13,7 +13,7 @@ import numpy as np
 from os.path import join, dirname, basename
 from typing import Dict, List, Optional
 from ase import Atoms
-from ase.io import read, write
+from ase.io import write
 from itertools import islice, combinations
 from dataforge.src import DataDict, fix_bonds, apply_replacements_fp
 from dataforge.src.generic import read_h5_file, append_suffix_to_filename
@@ -48,7 +48,6 @@ def build_dataset(
     logger.info("- Reading/bulding energy.csv files of energy-minimized nmers -")
     minimised_energy_dict = build_energy_dict(
         qchem_out_root=QCHEM_MIN_OUT_ROOT,
-        nmer_folder=nmer_folder,
         logger=logger,
     )
 
@@ -92,10 +91,9 @@ def build_energy_dict(
     already_computed_files = set()
 
     # Create regular expression to optionally iterate only a subset of the folders
-    folder_regex = f"**"
+    folder_regex = "**/*.out"
     if nmer_folder is not None:
-        folder_regex = os.path.join(folder_regex, nmer_folder)
-    folder_regex = os.path.join(folder_regex, "*.out")
+        folder_regex = os.path.join(nmer_folder, "**/*.out")
     # -------------------------------------------------------------------------- #
     
     nmer_df = None
@@ -129,7 +127,7 @@ def build_energy_dict(
             if os.path.isfile(nmer_energy_csv):
                 nmer_df = pd.read_csv(nmer_energy_csv)
                 num_nmer_files = len(glob.glob(os.path.join(nmer_folder, "*.out")))
-                if len(nmer_df) == num_nmer_files:    
+                if len(nmer_df) == num_nmer_files or True:
                     # Append nmer_df to the list of all nmer DataFrames
                     nmer = len(nmer_idcs)
                     energy_dict_implement_value: List[pd.DataFrame] = energy_dict_implement.get(nmer, [])
@@ -388,7 +386,7 @@ def build_fitting_dataset(
                 # Check if qchem output folder exists, to avoid an empty search in the nmer_df
                 qchem_out_folder = nmer_capping_folder.replace(nmers_capped_root, qchem_out_root)
                 if not os.path.isdir(qchem_out_folder):
-                    logger.warning(f"--- Missing qchem output files for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
+                    logger.warning(f"--- Missing qchem output folder for nmer {nmer_capping_folder.replace(nmers_capped_root, '')}. Missing folder: {qchem_out_folder} ---")
                     continue
 
                 all_coords, all_atom_types, all_fullnames, _, _ = read_h5_file(nmer_capping_filename)
