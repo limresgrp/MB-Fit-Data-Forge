@@ -127,7 +127,7 @@ def build_energy_dict(
             if os.path.isfile(nmer_energy_csv):
                 nmer_df = pd.read_csv(nmer_energy_csv)
                 num_nmer_files = len(glob.glob(os.path.join(nmer_folder, "*.out")))
-                if len(nmer_df) == num_nmer_files or True:
+                if len(nmer_df) == num_nmer_files:
                     # Append nmer_df to the list of all nmer DataFrames
                     nmer = len(nmer_idcs)
                     energy_dict_implement_value: List[pd.DataFrame] = energy_dict_implement.get(nmer, [])
@@ -340,6 +340,8 @@ def build_fitting_dataset(
 ):
     save_optimized_structures(qchem_min_out_root, fit_optimized_root, fit_poly_root)
 
+
+
     all_energies_contrib_dict = {}
     with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), 'r') as topology_f:
         topology = json.load(topology_f)
@@ -354,8 +356,8 @@ def build_fitting_dataset(
             nmer_energy_contrib_df_total: Optional[pd.DataFrame] = all_energies_contrib_dict.get(nmer_name, None)
 
             # -------------------------- Iterate xyz_capped folders -------------------------------- #
-            nmer_capping_folder_regex = os.path.join(nmers_capped_root, "**", DataDict.FOLDER_NAMES[k], "**", nmer_name)
-            for nmer_capping_filename in glob.glob(nmer_capping_folder_regex, recursive=True):
+            for subfolder in nmer_df.subfolder.unique():
+                nmer_capping_filename = os.path.join(nmers_capped_root, subfolder, nmer_name)
                 nmer_capping_folder = dirname(nmer_capping_filename)
                 out_filename = nmer_capping_filename.replace(nmers_capped_root, fit_dataset_root).replace('.h5', '.xyz')
                 nmer_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, fit_dataset_root)
@@ -389,9 +391,9 @@ def build_fitting_dataset(
                     logger.warning(f"--- Missing qchem output folder for nmer {nmer_capping_folder.replace(nmers_capped_root, '')}. Missing folder: {qchem_out_folder} ---")
                     continue
 
-                all_coords, all_atom_types, all_fullnames, _, _ = read_h5_file(nmer_capping_filename)
+                all_coords, all_atom_types, all_fullnames, _, _ = read_h5_file(nmer_capping_filename, logger=logger)
 
-                subfolder = os.path.relpath(dirname(out_filename), fit_dataset_root)
+                assert subfolder == os.path.relpath(dirname(out_filename), fit_dataset_root)
                 subfolder_nmer_df = nmer_df[nmer_df["subfolder"] == subfolder]
                 for _, row in subfolder_nmer_df.iterrows():
                     frame = row.frame_id_x
@@ -415,8 +417,8 @@ def build_fitting_dataset(
                         logger.warning(f"--- Missing energy contribution for nmer {str(e)}. Check if you are missing qchem output files ---")
                         break
                     except LookupError as e:
-                        logger.warning(f"--- {str(e)} ---")
-                        break
+                        # logger.warning(f"--- {str(e)} ---")
+                        continue
                     nmer_energy_contrib_df_row = pd.DataFrame(
                         [{
                             "name":             nmer_name,

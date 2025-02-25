@@ -1,4 +1,5 @@
 import json
+from logging import Logger
 import os
 import re
 import ast
@@ -97,8 +98,12 @@ def apply_replacements_fp(input_string, replacements = FOLDER_REPLACEMENTS, n: i
     # Apply the pass n times using reduce over the string
     return reduce(lambda acc, _: apply_once(acc), range(n), input_string)
 
-def read_h5_file(h5_filepath: str, rows_filter: np.ndarray | None = None):
-    print(f"Reading {h5_filepath} file")
+def read_h5_file(h5_filepath: str, logger: Logger = None, rows_filter: np.ndarray | None = None):
+    msg = f"Reading {h5_filepath} file"
+    if logger is None:
+        print(msg)
+    else:
+        logger.info(msg)
     def load(s):
         d: dict = json.loads(s)
         for k, v in d.items():
