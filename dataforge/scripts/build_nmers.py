@@ -60,6 +60,7 @@ def main(args=None):
             qchem_in_root           = args.qchem_in_root,
             qchem_min_in_root       = args.qchem_min_in_root,
             charges_dict            = charges_dict,
+            qchem_mode              = args.qchem_mode,
         )
 
 def parse_command_line(args=None):
@@ -147,6 +148,15 @@ def parse_command_line(args=None):
         default=None,
         help="Optional JSON object mapping monomer names to integer QChem charges.",
     )
+    parser.add_argument(
+        "--qchem-mode",
+        choices=["filtered", "minimization", "full"],
+        default="filtered",
+        help=(
+            "Prepare inputs selected by .list files, one optimization per "
+            "n-mer folder, or all frames already sampled into HDF5 files."
+        ),
+    )
     
     return parser.parse_args(args=args)
 
@@ -226,6 +236,7 @@ def prepare_qchem(
     qchem_in_root: Optional[str] = None,
     qchem_min_in_root: Optional[str] = None,
     charges_dict: Optional[dict] = None,
+    qchem_mode: str = "filtered",
 ):
     logger = get_logger('02_prepare_qchem.log', level=logging.DEBUG)
     
@@ -240,6 +251,9 @@ def prepare_qchem(
         qchem_min_in_root       = QCHEM_MIN_IN_ROOT,
         charges_dict            = charges_dict or DataDict.CHARGES_DICT,
         max_processes           = max_processes,
+        skip_if_not_frame_filter = qchem_mode == "filtered",
+        minimization_only        = qchem_mode == "minimization",
+        create_minimization_inputs = qchem_mode == "filtered",
     )
     logger.info("- Complete!")
 

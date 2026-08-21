@@ -242,7 +242,6 @@ else
 fi
 
 INITIAL_CAPPED="$DATASET_ROOT/data/xyz_capped"
-INITIAL_QCHEM_IN="$DATASET_ROOT/data/qchem_input_minimized"
 INITIAL_QCHEM_MIN_IN="$DATASET_ROOT/data/qchem_min_input"
 INITIAL_QCHEM_MIN_OUT="$DATASET_ROOT/data/qchem_min_output"
 FIT_POLY="$DATASET_ROOT/fitting/poly"
@@ -251,9 +250,9 @@ CHARGES_JSON=$(ask_default "Optional monomer-charge JSON (empty uses built-in ch
 CHARGE_ARGS=()
 if [[ -n "$CHARGES_JSON" ]]; then CHARGE_ARGS+=(--charges-json "$CHARGES_JSON"); fi
 
-if ask_yes_no "Prepare QChem inputs for the minimization pass?"; then
-    run_logged prepare_qchem_minimized "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$INITIAL_CAPPED" --qchem-in-root "$INITIAL_QCHEM_IN" --qchem-min-in-root "$INITIAL_QCHEM_MIN_IN" --max-processes "$BUILD_WORKERS" "${CHARGE_ARGS[@]}"
-    record_stage_metadata prepare_qchem_minimized "$(json_parameters charges_json="$CHARGES_JSON")" "$INITIAL_CAPPED" "$INITIAL_QCHEM_IN|$INITIAL_QCHEM_MIN_IN" "prepare minimization QChem inputs"
+if ask_yes_no "Prepare QChem inputs for the minimization pass?" y; then
+    run_logged prepare_qchem_minimized "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$INITIAL_CAPPED" --qchem-min-in-root "$INITIAL_QCHEM_MIN_IN" --qchem-mode minimization --max-processes "$BUILD_WORKERS" "${CHARGE_ARGS[@]}"
+    record_stage_metadata prepare_qchem_minimized "$(json_parameters charges_json="$CHARGES_JSON")" "$INITIAL_CAPPED" "$INITIAL_QCHEM_MIN_IN" "prepare minimization QChem inputs"
 fi
 
 if ask_yes_no "Load QChem and run minimized structures in parallel?"; then
@@ -278,11 +277,10 @@ if ask_yes_no "Apply measured distances and create corrected capped n-mers?"; th
 fi
 
 FINAL_QCHEM_IN="$DATASET_ROOT/data/qchem_input"
-FINAL_QCHEM_MIN_IN="$DATASET_ROOT/data/qchem_min_input_final"
 FINAL_QCHEM_OUT="$DATASET_ROOT/data/qchem_output"
 if ask_yes_no "Prepare QChem inputs for the complete corrected dataset?"; then
-    run_logged prepare_qchem_final "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$CORRECTED_CAPPED" --qchem-in-root "$FINAL_QCHEM_IN" --qchem-min-in-root "$FINAL_QCHEM_MIN_IN" --max-processes "$BUILD_WORKERS" "${CHARGE_ARGS[@]}"
-    record_stage_metadata prepare_qchem_final "$(json_parameters charges_json="$CHARGES_JSON")" "$CORRECTED_CAPPED" "$FINAL_QCHEM_IN|$FINAL_QCHEM_MIN_IN" "prepare final QChem inputs"
+    run_logged prepare_qchem_final "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$CORRECTED_CAPPED" --qchem-in-root "$FINAL_QCHEM_IN" --qchem-mode full --max-processes "$BUILD_WORKERS" "${CHARGE_ARGS[@]}"
+    record_stage_metadata prepare_qchem_final "$(json_parameters charges_json="$CHARGES_JSON")" "$CORRECTED_CAPPED" "$FINAL_QCHEM_IN" "prepare final QChem inputs"
 fi
 
 if ask_yes_no "Run whole-dataset QChem single points in parallel?"; then

@@ -126,6 +126,8 @@ python -m dataforge.scripts.recap_nmers apply \
 
 The initial minimization pass uses the element-based cap lengths to obtain minimized reference structures; only the subsequent full-dataset pass uses the measured minimized distances.
 
+Minimization preparation writes one `jobtype opt` input per n-mer folder directly into `data/qchem_min_input`; it does not require the legacy `.list` files from `03_sample_dataset.ipynb`. The final preparation pass writes `jobtype sp` inputs for every frame already sampled into the corrected HDF5 files. Input preparation fails visibly if no capped HDF5 files or no selected frames are found.
+
 Every guided stage writes a log under `metadata/logs/`, a stage manifest under `metadata/stages/`, and an append-only history in `metadata/pipeline.jsonl`. Manifests include parameters, input/output existence and sizes, hashes for small files, the Python executable, platform, and repository revision. The metadata command can also be used independently:
 
 ```bash
