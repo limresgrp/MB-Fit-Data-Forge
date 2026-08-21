@@ -1,6 +1,7 @@
 # Project related
 logs/
 .*
+.dataforge_workflow_root
 nohup.out
 graphify-out/
 orca/

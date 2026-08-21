@@ -75,17 +75,19 @@ The script outputs the following files:
 2. One `nmers.opt` for each nmer. This can be found inside the `DATASET_ROOT/fitting/optimized/` folder.
 3. One `poly_generator.py` for each nmer. This can be found inside the `DATASET_ROOT/fitting/poly/` folder.
 
-### 5 - Guided general n-mer workflow
+### 5 - Guided n-mer workflow
 
-For larger datasets, run the interactive workflow from the repository root:
+Run the single interactive workflow from the repository root:
 
 ```bash
 ./scripts/qchem_workflow.sh
 ```
 
-The implementation is also available at `scripts/glycerol_qchem_workflow.sh` for compatibility with existing commands. It is trajectory- and n-mer-order agnostic: it guides trajectory parsing, sampling of the requested orders, minimization-input preparation, parallel QChem minimizations, extraction of capping-H distances from the minimized `nmers.opt` structures, re-capping of every sampled frame with those distances, parallel single-point QChem calculations, and final energy-contribution/dataset generation. Orders above three use folders such as `4mers`, `5mers`, and so on.
+This is the only workflow shell script. It starts by creating the parsed trajectory dataset using the same inputs as `01_parse_traj.ipynb`: reference topology, trajectory files, atom selection, and trajectory slice. If a parsed `.npz` already exists, the script offers to reuse it. It then guides n-mer sampling, minimization-input preparation, parallel QChem minimizations, extraction of capping-H distances from minimized structures, re-capping, parallel single-point QChem calculations, and final energy-contribution/dataset generation. Orders above three use folders such as `4mers`, `5mers`, and so on.
 
-By default, `dataforge-build-nmers`/the workflow uses automatic monomer discovery. Each monomer starts as a heavy atom plus its bonded hydrogens; heavy atoms joined by an inferred or topology-provided double/triple bond are merged into one monomer. The discovery evidence is saved in `data/monomer_discovery.json`. Use `--monomer-mode legacy` when reproducing the historical POPC-specific composite-monomer rules, and provide `--bond-order-mode topology` or `geometry` when you want to force a particular bond-order source. For topology formats without bond orders (including common TPR inputs), `auto` records the fallback geometry inference and its distance evidence.
+The first dataset-root prompt defaults to the repository root. The selected absolute path is saved in `.dataforge_workflow_root` and becomes the default on subsequent calls, so later runs can resume the same dataset. The parsed trajectory defaults to `<dataset-root>/data/trajectory.npz`.
+
+By default, `dataforge-build-nmers`/the workflow uses automatic monomer discovery. Each monomer starts as a heavy atom plus its bonded hydrogens; heavy atoms joined by an inferred or topology-provided double/triple bond are merged into one monomer. The discovery evidence is saved in `data/monomer_discovery.json`. Use `--monomer-mode legacy` only when reproducing a pre-existing configured composite-monomer definition, and provide `--bond-order-mode topology` or `geometry` when you want to force a particular bond-order source. For topology formats without bond orders (including common TPR inputs), `auto` records the fallback geometry inference and its distance evidence.
 
 The corrected capped structures are written below `data/xyz_capped_minimized/`. The measured distances are recorded in `data/capping_distances.json`, so the re-capping step is auditable and repeatable.
 
@@ -105,7 +107,7 @@ python -m dataforge.scripts.recap_nmers apply \
   --distances DATASET_ROOT/data/capping_distances.json
 ```
 
-The initial minimization pass still uses the historical element-based cap lengths to obtain minimized reference structures; only the subsequent full-dataset pass uses the measured minimized distances.
+The initial minimization pass uses the element-based cap lengths to obtain minimized reference structures; only the subsequent full-dataset pass uses the measured minimized distances.
 
 Every guided stage writes a log under `metadata/logs/`, a stage manifest under `metadata/stages/`, and an append-only history in `metadata/pipeline.jsonl`. Manifests include parameters, input/output existence and sizes, hashes for small files, the Python executable, platform, and repository revision. The metadata command can also be used independently:
 
