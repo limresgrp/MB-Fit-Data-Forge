@@ -21,6 +21,43 @@ ask_yes_no() {
     [[ "$answer" == y || "$answer" == Y ]] || [[ -z "$answer" && "$default" == y ]]
 }
 
+ask_choice() {
+    local prompt=$1 default=$2 answer
+    while true; do
+        read -r -p "$prompt [$default] " answer
+        answer=${answer:-$default}
+        case "${answer,,}" in
+            c|continue) printf '%s' continue; return 0 ;;
+            s|sample|sample-more|more) printf '%s' sample-more; return 0 ;;
+        esac
+        echo "Enter 'continue' (c) or 'sample-more' (s)." >&2
+    done
+}
+
+estimate_sample_target() {
+    local xyz_root=$1
+    "$PYTHON" - "$xyz_root" <<'PY'
+import collections
+import glob
+import os
+import sys
+
+import h5py
+
+totals = collections.Counter()
+# Count only direct order/name/file groups (for example
+# xyz/trimers/<name>/*.h5). Recursive dimer/monomer subsets appear below
+# those folders and would otherwise inflate the inferred sampling target.
+for path in glob.iglob(os.path.join(sys.argv[1], "*", "*", "*.h5")):
+    try:
+        with h5py.File(path, "r") as handle:
+            totals[os.path.dirname(path)] += int(handle["coords"].shape[0])
+    except (OSError, KeyError):
+        continue
+print(max(totals.values(), default=0))
+PY
+}
+
 run_logged() {
     local stage=$1 command_status
     shift
@@ -129,39 +166,57 @@ else
     record_stage_metadata trajectory_parse "{}" "$TRAJ_DATASET" "$TRAJ_DATASET" "reuse parsed trajectory" reused
 fi
 
-MONOMER_MODE=$(ask_default "Monomer discovery mode (auto or legacy)" auto)
-BOND_ORDER_MODE=$(ask_default "Bond-order mode (auto, topology, or geometry)" auto)
-ORDER=$(ask_default "N-mer orders to build" "1 2 3")
-SAMPLE_COUNT=$(ask_default "Samples per requested n-mer name" 5000)
-SAMPLE_METHOD=$(ask_default "Sampling method (US or bounded FPS)" US)
-BUILD_WORKERS=$(ask_default "DataForge build worker processes" 4)
-KEEP_NMER_LINE=$(ask_default "Optional exact n-mer names, space-separated (empty means all)" "")
-KEEP_NMER_NAMES=()
-if [[ -n "$KEEP_NMER_LINE" ]]; then read -r -a KEEP_NMER_NAMES <<<"$KEEP_NMER_LINE"; fi
-SAMPLING_SPECS=()
-for order in $ORDER; do SAMPLING_SPECS+=("${order}=${SAMPLE_COUNT}:${SAMPLE_METHOD}"); done
-
+BUILD_WORKERS=$(ask_default "DataForge/QChem worker processes" 4)
 BUILD_NMERS=false
-EXISTING_NMER_FILE=""
+NMER_ACTION=continue
+EXISTING_NMER_COUNT=0
 if [[ -d "$DATASET_ROOT/data/xyz" ]]; then
-    EXISTING_NMER_FILE=$(find "$DATASET_ROOT/data/xyz" -type f -name '*.h5' -print -quit)
+    EXISTING_NMER_COUNT=$(find "$DATASET_ROOT/data/xyz" -type f -name '*.h5' | wc -l)
 fi
-if [[ -n "$EXISTING_NMER_FILE" ]]; then
-    if ask_yes_no "Existing n-mer files found. Recompute them?" n; then
-        BUILD_NMERS=true
-    fi
+if ((EXISTING_NMER_COUNT > 0)); then
+    echo "Detected parsed trajectory: $TRAJ_DATASET"
+    echo "Detected $EXISTING_NMER_COUNT sampled n-mer HDF5 files under $DATASET_ROOT/data/xyz."
+    NMER_ACTION=$(ask_choice "N-mer action: continue to the next phase, or sample more states?" continue)
+    if [[ "$NMER_ACTION" == sample-more ]]; then BUILD_NMERS=true; fi
 else
     if ask_yes_no "Build and initially cap the sampled n-mers?" y; then
         BUILD_NMERS=true
+        NMER_ACTION=initial-build
     fi
 fi
 
 if [[ "$BUILD_NMERS" == true ]]; then
+    MONOMER_MODE=$(ask_default "Monomer discovery mode (auto or legacy)" auto)
+    BOND_ORDER_MODE=$(ask_default "Bond-order mode (auto, topology, or geometry)" auto)
+    ORDER=$(ask_default "N-mer orders to build" "1 2 3")
+    CURRENT_SAMPLE_TARGET=0
+    SAMPLE_DEFAULT=5000
+    if [[ "$NMER_ACTION" == sample-more ]]; then
+        CURRENT_SAMPLE_TARGET=$(estimate_sample_target "$DATASET_ROOT/data/xyz")
+        if ((CURRENT_SAMPLE_TARGET > 0)); then SAMPLE_DEFAULT=$((CURRENT_SAMPLE_TARGET * 2)); fi
+        echo "Estimated current target: $CURRENT_SAMPLE_TARGET samples per n-mer name."
+        echo "Existing HDF5 files for selected n-mers will be replaced by the larger sampled sets."
+    fi
+    while true; do
+        SAMPLE_COUNT=$(ask_default "Target samples per requested n-mer name" "$SAMPLE_DEFAULT")
+        [[ "$SAMPLE_COUNT" =~ ^[1-9][0-9]*$ ]] || { echo "Enter a positive integer." >&2; continue; }
+        if [[ "$NMER_ACTION" == sample-more ]] && ((SAMPLE_COUNT <= CURRENT_SAMPLE_TARGET)); then
+            echo "The new target must exceed the estimated current target ($CURRENT_SAMPLE_TARGET)." >&2
+            continue
+        fi
+        break
+    done
+    SAMPLE_METHOD=$(ask_default "Sampling method (US or bounded FPS)" US)
+    KEEP_NMER_LINE=$(ask_default "Optional exact n-mer names, space-separated (empty means all)" "")
+    KEEP_NMER_NAMES=()
+    if [[ -n "$KEEP_NMER_LINE" ]]; then read -r -a KEEP_NMER_NAMES <<<"$KEEP_NMER_LINE"; fi
+    SAMPLING_SPECS=()
+    for order in $ORDER; do SAMPLING_SPECS+=("${order}=${SAMPLE_COUNT}:${SAMPLE_METHOD}"); done
     BUILD_ARGS=(-m dataforge.scripts.build_nmers build --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --sampling "${SAMPLING_SPECS[@]}" --monomer-mode "$MONOMER_MODE" --bond-order-mode "$BOND_ORDER_MODE" --max-processes "$BUILD_WORKERS")
     if ((${#KEEP_NMER_NAMES[@]})); then BUILD_ARGS+=(--keep-nmer-names "${KEEP_NMER_NAMES[@]}"); fi
     run_logged build_nmers "$PYTHON" "${BUILD_ARGS[@]}"
     record_stage_metadata build_nmers \
-        "$(json_parameters orders="${ORDER// /,}" samples="$SAMPLE_COUNT" method="$SAMPLE_METHOD" monomer_mode="$MONOMER_MODE" bond_order_mode="$BOND_ORDER_MODE")" \
+        "$(json_parameters action="$NMER_ACTION" orders="${ORDER// /,}" samples="$SAMPLE_COUNT" previous_sample_target="${CURRENT_SAMPLE_TARGET:-0}" method="$SAMPLE_METHOD" monomer_mode="$MONOMER_MODE" bond_order_mode="$BOND_ORDER_MODE")" \
         "$TRAJ_DATASET" "$DATASET_ROOT/data/xyz|$DATASET_ROOT/data/xyz_capped|$DATASET_ROOT/data/monomer_discovery.json|$DATASET_ROOT/data/topology.json" "build n-mers"
 else
     SOURCE_NMER_COUNT=0
