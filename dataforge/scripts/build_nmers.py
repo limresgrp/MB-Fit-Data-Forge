@@ -19,7 +19,7 @@ from dataforge.src.qchem_utils import prepare_qchem_input
 from dataforge.src.logging import get_logger
 from dataforge.src.nmers import Monomer, Multimer
 from dataforge.src.generic import argofyinx, read_h5_file, write_h5_file
-from dataforge.src.monomer_discovery import discover_monomer_groups
+from dataforge.src.monomer_discovery import COVALENT_RADII, discover_monomer_groups
 
 
 def main(args=None):
@@ -37,6 +37,15 @@ def main(args=None):
             bond_order_mode         = args.bond_order_mode,
             max_processes           = args.max_processes,
             suffix                  = args.suffix,
+        )
+    elif args.mode == 'cap':
+        data_root = join(args.root, "data")
+        build_xyz_capped_nmers(
+            nmers_root=join(data_root, "xyz" + args.suffix),
+            nmers_capped_root=join(data_root, "xyz_capped" + args.suffix),
+            fit_poly_root=join(args.root, "fitting" + args.suffix, "poly" + args.suffix),
+            logger=get_logger('02_cap_nmers.log', level=logging.DEBUG),
+            max_processes=args.max_processes,
         )
     elif args.mode == 'prepare_qchem':
         charges_dict = dict(DataDict.CHARGES_DICT)
@@ -56,14 +65,16 @@ def main(args=None):
 def parse_command_line(args=None):
     parser = argparse.ArgumentParser(
         description="""
-        Read one or more trajectory files, filter and group the molecule of interest
-        and save the information as a npz dataset file.
+        Build and cap sampled n-mers, or prepare their QChem input files.
     """
     )
     parser.add_argument(
         "mode",
-        choices=['build', 'prepare_qchem'],
-        help="Mode of operation: 'build' to build nmers, 'prepare_qchem' to prepare QChem input files.",
+        choices=['build', 'cap', 'prepare_qchem'],
+        help=(
+            "'build' samples and initially caps n-mers; 'cap' caps existing "
+            "sampled n-mers; 'prepare_qchem' prepares QChem input files."
+        ),
     )
     parser.add_argument(
         "-i",
@@ -900,11 +911,31 @@ def _distance_by_severed_order(info_dict: dict, capping_distances: Optional[dict
     return distances
 
 
+def _initial_capping_distance(atom_type: str):
+    """Return a reasonable initial X-H distance and an auditable source."""
+    atom_type = str(atom_type).strip()
+    normalised = atom_type[:1].upper() + atom_type[1:].lower()
+    if normalised in DataDict.ATOM_TYPE_TO_H_DISTANCE:
+        return float(DataDict.ATOM_TYPE_TO_H_DISTANCE[normalised]), "calibrated_table"
+
+    radius = COVALENT_RADII.get(normalised)
+    hydrogen_radius = COVALENT_RADII.get("H")
+    if radius is None or hydrogen_radius is None:
+        supported = ", ".join(sorted(COVALENT_RADII))
+        raise ValueError(
+            f"Cannot choose an initial {normalised or atom_type}-H capping distance. "
+            f"Add a calibrated value to DataDict.ATOM_TYPE_TO_H_DISTANCE or a "
+            f"covalent radius to COVALENT_RADII. Supported elements: {supported}."
+        )
+    return float(radius + hydrogen_radius), "covalent_radii"
+
+
 def substitute_severed_atoms(
     all_coords,
     atom_types,
     info_dict: dict,
     capping_distances: Optional[dict] = None,
+    return_capping_metadata: bool = False,
 ):
     severed_idcs = np.asarray(info_dict.get("severed_idcs", []), dtype=int)
     nmer_idcs = np.delete(np.arange(all_coords.shape[1]), severed_idcs)
@@ -916,6 +947,8 @@ def substitute_severed_atoms(
         severed_bonded_idcs = severed_bonded_idcs.reshape(1, -1)
 
     H_substituted_coords = np.zeros_like(severed_coords)
+    applied_distances = []
+    distance_sources = []
     for i, severed_atom_coords in enumerate(severed_coords.transpose(1, 0, 2)):
         distance_vectors = severed_atom_coords[:, None, :] - nmer_coords
         distances = np.linalg.norm(distance_vectors, axis=2)
@@ -931,7 +964,11 @@ def substitute_severed_atoms(
         atom_type = str(atom_types[nmer_idcs][severed_atom_neighbour_id])
         atom_type_H_distance = distances_by_severed_order[i]
         if atom_type_H_distance is None:
-            atom_type_H_distance = DataDict.ATOM_TYPE_TO_H_DISTANCE[atom_type]
+            atom_type_H_distance, distance_source = _initial_capping_distance(atom_type)
+        else:
+            distance_source = "minimized_structure"
+        applied_distances.append(float(atom_type_H_distance))
+        distance_sources.append(distance_source)
         H_substituted_coords[:, i, :] = (
             nmer_coords[np.arange(nmer_coords.shape[0]), severed_atom_neighbour_id] +
             distance_vectors[np.arange(distance_vectors.shape[0]), severed_atom_neighbour_id] /
@@ -941,6 +978,11 @@ def substitute_severed_atoms(
     all_coords[:, severed_idcs] = H_substituted_coords
     atom_types[severed_idcs] = b'H'
 
+    if return_capping_metadata:
+        return all_coords, atom_types, {
+            "capping_distances": applied_distances,
+            "capping_distance_sources": distance_sources,
+        }
     return all_coords, atom_types
 
 def cap_nmer(
@@ -961,11 +1003,12 @@ def cap_nmer(
     coords, atom_types, fullnames, info_dict, _ = read_h5_file(h5_filepath)
 
     # Process the data
-    capped_coords, capped_atom_types = substitute_severed_atoms(
+    capped_coords, capped_atom_types, capping_metadata = substitute_severed_atoms(
         coords,
         atom_types,
         info_dict,
         capping_distances=capping_distances,
+        return_capping_metadata=True,
     )
 
     # --
@@ -1002,6 +1045,7 @@ def cap_nmer(
         "capping_source_severed_indices": source_severed_indices,
         "capping_atom_indices": capping_atom_indices,
         "capping_bonded_indices": capping_bonded_indices,
+        **capping_metadata,
     }
 
     write_h5_file(h5_capped_filepath, capped_coords, capped_atom_types, fullnames, info_dict, **result)

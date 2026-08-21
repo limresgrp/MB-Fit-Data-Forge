@@ -163,6 +163,27 @@ if [[ "$BUILD_NMERS" == true ]]; then
     record_stage_metadata build_nmers \
         "$(json_parameters orders="${ORDER// /,}" samples="$SAMPLE_COUNT" method="$SAMPLE_METHOD" monomer_mode="$MONOMER_MODE" bond_order_mode="$BOND_ORDER_MODE")" \
         "$TRAJ_DATASET" "$DATASET_ROOT/data/xyz|$DATASET_ROOT/data/xyz_capped|$DATASET_ROOT/data/monomer_discovery.json|$DATASET_ROOT/data/topology.json" "build n-mers"
+else
+    SOURCE_NMER_COUNT=0
+    CAPPED_NMER_COUNT=0
+    if [[ -d "$DATASET_ROOT/data/xyz" ]]; then
+        SOURCE_NMER_COUNT=$(find "$DATASET_ROOT/data/xyz" -type f -name '*.h5' | wc -l)
+    fi
+    if [[ -d "$DATASET_ROOT/data/xyz_capped" ]]; then
+        CAPPED_NMER_COUNT=$(find "$DATASET_ROOT/data/xyz_capped" -type f -name '*.h5' | wc -l)
+    fi
+    CAP_DEFAULT=n
+    CAP_PROMPT="Re-cap existing n-mer files?"
+    if ((CAPPED_NMER_COUNT < SOURCE_NMER_COUNT)); then
+        CAP_DEFAULT=y
+        CAP_PROMPT="Initial capped dataset is incomplete (${CAPPED_NMER_COUNT}/${SOURCE_NMER_COUNT}). Finish capping existing n-mers?"
+    fi
+    if ((SOURCE_NMER_COUNT > 0)) && ask_yes_no "$CAP_PROMPT" "$CAP_DEFAULT"; then
+        run_logged cap_nmers "$PYTHON" -m dataforge.scripts.build_nmers cap --root "$DATASET_ROOT" --max-processes "$BUILD_WORKERS"
+        record_stage_metadata cap_nmers \
+            "$(json_parameters source_count="$SOURCE_NMER_COUNT" previous_capped_count="$CAPPED_NMER_COUNT")" \
+            "$DATASET_ROOT/data/xyz" "$DATASET_ROOT/data/xyz_capped" "cap existing n-mers"
+    fi
 fi
 
 INITIAL_CAPPED="$DATASET_ROOT/data/xyz_capped"
