@@ -6,8 +6,6 @@ from functools import reduce
 from itertools import product
 from itertools import chain
 from dataforge.src import get_bonds, get_angles, get_dihedrals, union_rows_2d, intersect_rows_2d
-from sklearn.cluster import DBSCAN
-from scipy.spatial.distance import cdist
 
 
 class Monomer:
@@ -218,7 +216,42 @@ class Multimer:
                 name.append(f"{name_unique_id}_{''.join(sorted(connections))}")
             self.name = f"{self.name}|{'.'.join(sorted(name))}"
 
-    def compute_descriptors(self):
+    def compute_descriptors(self, orig_all_pos: Optional[np.ndarray] = None):
+        if orig_all_pos is not None:
+            self.bond_values = get_bonds(orig_all_pos, self.orig_bond_idcs)
+            self.angle_values = get_angles(orig_all_pos, self.orig_angle_idcs)
+            self.dihedral_values = get_dihedrals(orig_all_pos, self.orig_dihedral_idcs)
+
+            def descriptor_names(index_attribute, name_attribute, target_indices):
+                names_by_indices = {}
+                for monomer in self._monomers:
+                    for indices, name in zip(
+                        getattr(monomer, index_attribute),
+                        getattr(monomer, name_attribute),
+                    ):
+                        key = tuple(indices)
+                        names_by_indices.setdefault(key, name)
+                        names_by_indices.setdefault(key[::-1], name)
+                return np.asarray([
+                    names_by_indices.get(tuple(indices), "")
+                    for indices in target_indices
+                ])
+
+            self.bond_names = descriptor_names("orig_bond_idcs", "bond_names", self.orig_bond_idcs)
+            self.angle_names = descriptor_names("orig_angle_idcs", "angle_names", self.orig_angle_idcs)
+            self.dihedral_names = descriptor_names("orig_dihedral_idcs", "dihedral_names", self.orig_dihedral_idcs)
+            return
+
+        if len(self._monomers) == 1:
+            monomer = self._monomers[0]
+            self.bond_values = monomer.bond_values
+            self.bond_names = monomer.bond_names
+            self.angle_values = monomer.angle_values
+            self.angle_names = monomer.angle_names
+            self.dihedral_values = monomer.dihedral_values
+            self.dihedral_names = monomer.dihedral_names
+            return
+
         bond_values, angle_values, dihedral_values = [], [], []
         bond_names, angle_names, dihedral_names = [], [], []
         already_computed_bond, already_computed_angle, already_computed_dihedral = [], [], []
@@ -330,107 +363,113 @@ class Multimer:
         raise Exception(f"Method '{method}' is not supported")
     
     def sample_uniform(self, n_samples):
-        descriptor_values = self.descriptor_values
-        n_frames, n_descriptors = descriptor_values.shape
-        samples_per_descriptor = max(n_samples // n_descriptors, 1)
+        n_frames = len(self.bond_values)
+        if n_samples > n_frames:
+            raise Exception(f'Number of samples ({n_samples}) > Number of dataset frames ({n_frames})')
+        if n_samples == n_frames:
+            return np.arange(n_frames, dtype=int)
+
+        descriptor_arrays = [
+            values for values in (self.bond_values, self.angle_values, self.dihedral_values)
+            if values is not None and values.shape[1] > 0
+        ]
+        n_descriptors = sum(values.shape[1] for values in descriptor_arrays)
         self.logger.debug(f"Multimer {self.name} -- " +
                           f"Sampling {n_samples} samples uniformly across {n_frames} frames and {n_descriptors} descriptors")
 
-        descriptors_pool = descriptor_values.T.copy()
-        if n_samples > descriptors_pool.shape[-1]:
-            raise Exception(f'Number of samples ({n_samples}) > Number of dataset frames ({descriptors_pool.shape[-1]})')
-        sampled_idcs = np.array([], dtype=int)
-        while len(sampled_idcs) < n_samples:
-            sweep_sampled_idcs = []
-            for descriptor in descriptors_pool:
-                sampling_step = max(1, len(descriptor) // samples_per_descriptor)
-                sweep_sampled_idcs.append(np.argsort(descriptor)[::sampling_step])
-            sweep_sampled_idcs = np.unique(np.concatenate(sweep_sampled_idcs))
-            sampled_idcs = np.union1d(sampled_idcs, sweep_sampled_idcs)
-            not_sampled_idcs = np.setdiff1d(np.arange(n_frames), sampled_idcs)
-            descriptors_pool = descriptor_values.copy()[not_sampled_idcs].T
-        return sampled_idcs[:n_samples]
+        if n_descriptors == 0:
+            return np.linspace(0, n_frames - 1, n_samples, dtype=int)
+
+        samples_per_descriptor = max(int(np.ceil(n_samples / n_descriptors)), 1)
+        quantile_positions = np.linspace(
+            0,
+            n_frames - 1,
+            min(samples_per_descriptor, n_frames),
+            dtype=int,
+        )
+        candidates = []
+        for values in descriptor_arrays:
+            for descriptor_index in range(values.shape[1]):
+                order = np.argsort(values[:, descriptor_index], kind="stable")
+                candidates.append(order[quantile_positions])
+
+        sampled_idcs = np.unique(np.concatenate(candidates))
+        if len(sampled_idcs) < n_samples:
+            fallback = np.linspace(0, n_frames - 1, n_samples * 2, dtype=int)
+            sampled_idcs = np.union1d(sampled_idcs, fallback)
+        if len(sampled_idcs) < n_samples:
+            sampled_idcs = np.union1d(sampled_idcs, np.arange(n_frames, dtype=int))
+        if len(sampled_idcs) > n_samples:
+            keep = np.linspace(0, len(sampled_idcs) - 1, n_samples, dtype=int)
+            sampled_idcs = sampled_idcs[keep]
+        return np.sort(sampled_idcs.astype(int, copy=False))
 
     def sample_furthest_point(self, n_samples):
-        descriptor_values = self.descriptor_standardized_values
-        n_frames, n_descriptors = descriptor_values.shape
+        n_frames = len(self.bond_values)
+        if n_samples > n_frames:
+            raise Exception(f'Number of samples ({n_samples}) > Number of dataset frames ({n_frames})')
+        if n_samples == n_frames:
+            return np.arange(n_frames, dtype=int)
 
-        # Cluster data with DBSCAN
-        dbscan = DBSCAN(eps=1.0*np.sqrt(n_descriptors), min_samples=max(2, int(0.01 * n_frames)))
-        dbscan.fit(descriptor_values)
+        # First obtain a descriptor-diverse, bounded candidate set from the
+        # complete trajectory. Exact FPS is then applied only to candidates.
+        # This avoids DBSCAN's potentially quadratic neighborhood memory.
+        candidate_count = min(n_frames, max(1000, 2 * n_samples))
+        candidate_count = min(candidate_count, 50000)
+        candidate_indices = self.sample_uniform(candidate_count)
+        points = self._standardized_descriptor_rows(candidate_indices)
+        if points.shape[1] == 0:
+            keep = np.linspace(0, len(candidate_indices) - 1, n_samples, dtype=int)
+            return np.sort(candidate_indices[keep])
 
-        # Check the clustering labels and adjust for cases where no clusters are formed
-        cluster_labels = dbscan.labels_
-        unique_labels = np.unique(cluster_labels[cluster_labels != -1])  # Exclude noise points (-1 label)
+        self.logger.debug(
+            f"Multimer {self.name} -- bounded FPS: {n_samples} samples from "
+            f"{n_frames} frames via {len(candidate_indices)} candidates and "
+            f"{points.shape[1]} standardized descriptors"
+        )
+        selected_local = self._greedy_fps(points, n_samples)
+        return np.sort(candidate_indices[selected_local])
 
-        self.logger.debug(f"Multimer {self.name} -- " +
-                          f"Sampling {n_samples} samples using FPS across {n_frames} frames and {n_descriptors} descriptors." +
-                          f"Number of DBSCAN Clusters: {len(unique_labels)}")
+    def _standardized_descriptor_rows(self, indices: np.ndarray) -> np.ndarray:
+        parts = []
+        if self.bond_values is not None and self.bond_values.shape[1] > 0:
+            parts.append(np.asarray(self.bond_values[indices], dtype=np.float32))
+        for values in (self.angle_values, self.dihedral_values):
+            if values is None or values.shape[1] == 0:
+                continue
+            selected = np.asarray(values[indices], dtype=np.float32)
+            parts.extend((np.sin(selected), np.cos(selected)))
+        if not parts:
+            return np.empty((len(indices), 0), dtype=np.float32)
 
-        # If clusters are formed, calculate cluster centers; otherwise, proceed with single "global" center
-        if len(unique_labels) > 0:
-            # Compute the centers of each cluster
-            cluster_centers = np.array([descriptor_values[cluster_labels == label].mean(axis=0) for label in unique_labels])
-        else:
-            # If no clusters are formed, use the mean of all data points as a single center
-            cluster_centers = np.array([descriptor_values.mean(axis=0)])
-        
-        # Furthest Point Sampling (FPS) to select N points that are maximally distant from the cluster centers
-        def furthest_point_sampling(points, cluster_centers, n_samples):
-            """
-            Selects n_samples points from the dataset that are farthest from cluster centers using Furthest Point Sampling.
-            
-            Parameters:
-            - points: numpy array, shape (n_samples, n_features), the feature vectors
-            - cluster_centers: numpy array, shape (n_clusters, n_features), the cluster centers
-            - n_samples: int, number of samples to select
-            
-            Returns:
-            - selected_indices: list of int, indices of the selected points
-            """
+        points = np.concatenate(parts, axis=1).astype(np.float32, copy=False)
+        means = points.mean(axis=0, dtype=np.float64).astype(np.float32)
+        scales = points.std(axis=0, dtype=np.float64).astype(np.float32)
+        scales[scales == 0] = 1.0
+        points -= means
+        points /= scales
+        return points
 
-            # Store number of cluster_centers
-            n_cc = len(cluster_centers)
-            # Stack cluster_centers to points. They will behave like "already selected points"
-            _points = np.vstack([cluster_centers, points])
-            # Represent the points by their indices in points
-            points_left = np.arange(len(_points)) # [P]
-            # Initialise distances to inf
-            dists = np.ones_like(points_left) * float('inf') # [P]
-            # Initialise an array for the sampled indices
-            sample_inds = np.zeros(n_cc + n_samples, dtype='int') # [S]
-            # Select cluster_centers
-            sample_inds[:n_cc] = points_left[:n_cc]
-            # Remove cluster_centers from points_left
-            points_left = points_left[n_cc:]
-            # Initialize last_added to cluster_centers
-            last_added = sample_inds[:n_cc]
+    @staticmethod
+    def _greedy_fps(points: np.ndarray, n_samples: int) -> np.ndarray:
+        n_points = len(points)
+        if n_samples >= n_points:
+            return np.arange(n_points, dtype=int)
 
-            # Iteratively select points for a maximum of n_samples
-            for i in range(n_samples):
-                # Find the distance to the last added point in selected and all the others
-                if i > 0:
-                    last_added = sample_inds[n_cc+i-1:n_cc+i]
-                
-                dist_to_last_added_point = cdist(_points[last_added], _points[points_left]) # [P - i]
-
-                # If closer, updated distances
-                dists[points_left] = np.minimum(
-                    dist_to_last_added_point, 
-                    dists[points_left]
-                ) # [P - i]
-
-                # We want to pick the one that has the largest nearest neighbour
-                # distance to the sampled points
-                selected = np.argmax(dists[points_left])
-                sample_inds[n_cc+i] = points_left[selected]
-
-                # Update points_left
-                points_left = np.delete(points_left, selected)
-            
-            return sample_inds[n_cc:] - n_cc
-
-        # Run FPS with cluster centers
-        selected_indices = furthest_point_sampling(descriptor_values, cluster_centers, n_samples)
-
-        return selected_indices
+        center = points.mean(axis=0, dtype=np.float64).astype(np.float32)
+        delta = points - center
+        first = int(np.argmax(np.einsum('ij,ij->i', delta, delta)))
+        selected = np.empty(n_samples, dtype=int)
+        selected_mask = np.zeros(n_points, dtype=bool)
+        min_distances = np.full(n_points, np.inf, dtype=np.float32)
+        current = first
+        for sample_index in range(n_samples):
+            selected[sample_index] = current
+            selected_mask[current] = True
+            delta = points - points[current]
+            distances = np.einsum('ij,ij->i', delta, delta)
+            np.minimum(min_distances, distances, out=min_distances)
+            min_distances[selected_mask] = -np.inf
+            if sample_index + 1 < n_samples:
+                current = int(np.argmax(min_distances))
+        return selected

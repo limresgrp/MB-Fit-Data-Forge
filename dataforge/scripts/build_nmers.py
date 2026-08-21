@@ -265,7 +265,7 @@ def build_xyz_nmers(
         monomers, discovery_metadata = build_auto_monomers(
             dataset=traj_dataset,
             logger=logger,
-            compute_descriptors=compute_descriptors,
+            compute_descriptors=False,
             bond_order_mode=bond_order_mode,
         )
     else:
@@ -274,7 +274,7 @@ def build_xyz_nmers(
             monomers_dict=monomers_dict,
             logger=logger,
             keep_only_monomer_names=keep_only_monomer_names,
-            compute_descriptors=compute_descriptors,
+            compute_descriptors=False,
         )
         discovery_metadata = {
             "mode": "legacy",
@@ -619,8 +619,6 @@ def build_multimer_recursively(
             and multimer.name not in keep_nmer_names
         ):
             continue
-        if compute_descriptors:
-            multimer.compute_descriptors()
         multimers.append(multimer)
         
         # - Count occurrences of each multimer - #
@@ -630,6 +628,16 @@ def build_multimer_recursively(
 
     prepared_tasks = []
     for multimer in multimers:
+        needs_sampling_descriptors = (
+            compute_descriptors
+            and recursive_multimer_sampled_indices is None
+            and n_samples is not None
+        )
+        if needs_sampling_descriptors:
+            # Compute only the current n-mer's descriptors. Keeping descriptor
+            # arrays on every monomer scales with trajectory_frames * topology
+            # and exhausted RAM for multi-million-frame trajectories.
+            multimer.compute_descriptors(orig_all_pos=orig_pos)
         sampled_indices = select_multimer_sampled_indices(
             multimer=multimer,
             n_samples=n_samples,
@@ -638,16 +646,20 @@ def build_multimer_recursively(
             multimers_first_occurrence=multimers_first_occurrence,
             recursive_multimer_sampled_indices=recursive_multimer_sampled_indices,
         )
-        # Select frames before selecting atoms. This keeps multiprocessing
-        # tasks proportional to the requested sample count, rather than to
-        # the full trajectory length.
-        task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
-        task_coords = task_coords[:, multimer.orig_all_atoms_idcs]
-        prepared_tasks.append((multimer, sampled_indices, task_coords))
+        # Sampling is complete; workers and recursion only need topology and
+        # frame indices. Do not retain or pickle full-frame descriptor copies.
+        multimer.bond_values = None
+        multimer.angle_values = None
+        multimer.dihedral_values = None
+        prepared_tasks.append((multimer, sampled_indices))
 
     if max_processes <= 1:
         result = []
-        for multimer, sampled_indices, task_coords in prepared_tasks:
+        for multimer, sampled_indices in prepared_tasks:
+            # Slice one serial task at a time instead of retaining sampled
+            # coordinates for every n-mer until all files have been written.
+            task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
+            task_coords = task_coords[:, multimer.orig_all_atoms_idcs]
             res = process_multimer(
                 multimer,
                 nmers_root,
@@ -663,6 +675,14 @@ def build_multimer_recursively(
             )
             result.append(res)
     else:
+        # Select frames before selecting atoms. This keeps worker tasks
+        # proportional to the requested sample count rather than the full
+        # trajectory length.
+        worker_tasks = []
+        for multimer, sampled_indices in prepared_tasks:
+            task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
+            task_coords = task_coords[:, multimer.orig_all_atoms_idcs]
+            worker_tasks.append((multimer, sampled_indices, task_coords))
         with multiprocessing.Pool(processes=max_processes) as pool:
             result = pool.starmap(
                 process_multimer,
@@ -680,7 +700,7 @@ def build_multimer_recursively(
                         recursive_multimer_sampled_indices,
                         sampled_indices,
                     )
-                    for multimer, sampled_indices, task_coords in prepared_tasks
+                    for multimer, sampled_indices, task_coords in worker_tasks
                 ]
             )
     
