@@ -29,6 +29,15 @@ MB-Fit-Data-Forge is a tool used to prepare input data for MB-Fit, starting from
     pip install -e .
     ```
 
+Alternatively, create the project virtual environment and install the repository with all declared dependencies using:
+
+```bash
+./scripts/setup_venv.sh
+source .venv/bin/activate
+```
+
+The setup script accepts `PYTHON_BIN` to select the Python executable and `VENV_DIR` to choose a different environment location.
+
 ## Usage ##
 
 ### 1 - Parse trajectory: `01_parse_traj.ipynb` ###
