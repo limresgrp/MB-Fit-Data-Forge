@@ -34,7 +34,7 @@ def write_qchem_input(h5_filepath: str, nmers_capped_root: str, qchem_in_root: s
     else:
         if skip_if_not_frame_filter:
             return
-        frame_filter = np.arange(len(all_coords))
+        frame_filter = None
     
     qchem_in_root_folder = dirname(h5_filepath).replace(nmers_capped_root, qchem_in_root)
     os.makedirs(qchem_in_root_folder, exist_ok=True)

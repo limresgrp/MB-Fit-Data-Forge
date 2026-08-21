@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import logging
 import os
 import glob
@@ -18,25 +19,38 @@ from dataforge.src.qchem_utils import prepare_qchem_input
 from dataforge.src.logging import get_logger
 from dataforge.src.nmers import Monomer, Multimer
 from dataforge.src.generic import argofyinx, read_h5_file, write_h5_file
+from dataforge.src.monomer_discovery import discover_monomer_groups
 
 
 def main(args=None):
     args = parse_command_line(args)
 
     if args.mode == 'build':
+        nmer_sampling_conf = parse_sampling_specs(args.sampling) if args.sampling else args.order
         build_nmers(
             input_filename          = args.input,
             dataset_root            = args.root,
-            nmer_sampling_conf      = args.order,
+            nmer_sampling_conf      = nmer_sampling_conf,
             keep_only_monomer_names = args.keep,
+            keep_nmer_names         = args.keep_nmer_names,
+            monomer_mode            = args.monomer_mode,
+            bond_order_mode         = args.bond_order_mode,
             max_processes           = args.max_processes,
             suffix                  = args.suffix,
         )
     elif args.mode == 'prepare_qchem':
+        charges_dict = dict(DataDict.CHARGES_DICT)
+        if args.charges_json:
+            with open(args.charges_json) as charges_file:
+                charges_dict.update(json.load(charges_file))
         prepare_qchem(
             dataset_root            = args.root,
             suffix                  = args.suffix,
             max_processes           = args.max_processes,
+            nmers_capped_root       = args.nmers_capped_root,
+            qchem_in_root           = args.qchem_in_root,
+            qchem_min_in_root       = args.qchem_min_in_root,
+            charges_dict            = charges_dict,
         )
 
 def parse_command_line(args=None):
@@ -71,11 +85,35 @@ def parse_command_line(args=None):
         required=False,
     )
     parser.add_argument(
+        "--sampling",
+        nargs='+',
+        help="Sampling specifications such as '1=5000' or '3=10000:FPS'. Overrides --order.",
+        required=False,
+    )
+    parser.add_argument(
         "-k",
         "--keep",
         nargs='+',
         help="Optional list with the monomer names to keep. All other monomers will be ignored.",
         default=None,
+    )
+    parser.add_argument(
+        "--keep-nmer-names",
+        nargs='+',
+        help="Optional exact multimer names to keep at the highest requested order.",
+        default=None,
+    )
+    parser.add_argument(
+        "--monomer-mode",
+        choices=["auto", "legacy"],
+        default="auto",
+        help="Discover monomer cores from connectivity/bond orders, or use the legacy POPC rules.",
+    )
+    parser.add_argument(
+        "--bond-order-mode",
+        choices=["auto", "topology", "geometry"],
+        default="auto",
+        help="Use topology bond orders when available, infer them from geometry, or force single-bond fallback.",
     )
     parser.add_argument(
         "-s",
@@ -90,14 +128,42 @@ def parse_command_line(args=None):
         type=int,
         default=0,
     )
+    parser.add_argument("--nmers-capped-root", default=None)
+    parser.add_argument("--qchem-in-root", default=None)
+    parser.add_argument("--qchem-min-in-root", default=None)
+    parser.add_argument(
+        "--charges-json",
+        default=None,
+        help="Optional JSON object mapping monomer names to integer QChem charges.",
+    )
     
     return parser.parse_args(args=args)
+
+
+def parse_sampling_specs(specs: List[str]) -> Dict[int, Union[int, tuple]]:
+    """Parse CLI sampling specifications of the form ``ORDER=N[:METHOD]``."""
+    result = {}
+    for spec in specs:
+        if '=' not in spec:
+            raise ValueError(f"Invalid sampling specification {spec!r}; expected ORDER=N[:METHOD].")
+        order_text, value_text = spec.split('=', 1)
+        order = int(order_text)
+        value_parts = value_text.split(':', 1)
+        n_samples = int(value_parts[0])
+        if n_samples < 1:
+            raise ValueError(f"Number of samples must be positive in {spec!r}.")
+        method = (value_parts[1] if len(value_parts) == 2 and value_parts[1] else 'US').upper()
+        result[order] = (n_samples, method)
+    return result
 
 def build_nmers(
     input_filename: str,
     dataset_root: str,
     nmer_sampling_conf: Union[List[int], Dict[int, int]],
     keep_only_monomer_names: Optional[List[str]] = None,
+    keep_nmer_names: Optional[List[str]] = None,
+    monomer_mode: str = "legacy",
+    bond_order_mode: str = "auto",
     max_processes: int = 0,
     suffix: str = "",
     **kwargs
@@ -124,6 +190,9 @@ def build_nmers(
         nmer_sampling_conf      = nmer_sampling_conf,
         logger                  = logger,
         keep_only_monomer_names = keep_only_monomer_names,
+        keep_nmer_names         = keep_nmer_names,
+        monomer_mode            = monomer_mode,
+        bond_order_mode         = bond_order_mode,
         compute_descriptors     = automatic_sampling,
         max_processes           = max_processes,
     )
@@ -142,19 +211,23 @@ def prepare_qchem(
     dataset_root: str,
     suffix: str = "",
     max_processes: int = 0,
+    nmers_capped_root: Optional[str] = None,
+    qchem_in_root: Optional[str] = None,
+    qchem_min_in_root: Optional[str] = None,
+    charges_dict: Optional[dict] = None,
 ):
     logger = get_logger('02_prepare_qchem.log', level=logging.DEBUG)
     
     DATA_ROOT         =  join(dataset_root, "data"                    )
-    NMERS_CAPPED_ROOT =  join(DATA_ROOT   , "xyz_capped"     , suffix)
-    QCHEM_IN_ROOT     =  join(DATA_ROOT   , "qchem_input"    , suffix)
-    QCHEM_MIN_IN_ROOT =  join(DATA_ROOT   , "qchem_min_input", suffix)
+    NMERS_CAPPED_ROOT = nmers_capped_root or join(DATA_ROOT, "xyz_capped", suffix)
+    QCHEM_IN_ROOT     = qchem_in_root or join(DATA_ROOT, "qchem_input", suffix)
+    QCHEM_MIN_IN_ROOT = qchem_min_in_root or join(DATA_ROOT, "qchem_min_input", suffix)
 
     prepare_qchem_input(
         nmers_capped_root       = NMERS_CAPPED_ROOT,
         qchem_in_root           = QCHEM_IN_ROOT,
         qchem_min_in_root       = QCHEM_MIN_IN_ROOT,
-        charges_dict            = DataDict.CHARGES_DICT,
+        charges_dict            = charges_dict or DataDict.CHARGES_DICT,
         max_processes           = max_processes,
     )
     logger.info("- Complete!")
@@ -167,6 +240,9 @@ def build_xyz_nmers(
     nmer_sampling_conf: dict,
     logger: Logger,
     keep_only_monomer_names: Optional[List[str]] = None,
+    keep_nmer_names: Optional[List[str]] = None,
+    monomer_mode: str = "legacy",
+    bond_order_mode: str = "auto",
     compute_descriptors: bool = True,
     max_processes: int = 0
 ):
@@ -185,18 +261,32 @@ def build_xyz_nmers(
     # ---------------------------------------------------------------- #
 
     logger.info("-- Building monomers...")
-    monomers = build_monomers(
-        dataset=traj_dataset,
-        monomers_dict=monomers_dict,
-        logger=logger,
-        keep_only_monomer_names=keep_only_monomer_names,
-        compute_descriptors=compute_descriptors,
-    )
+    if monomer_mode == "auto":
+        monomers, discovery_metadata = build_auto_monomers(
+            dataset=traj_dataset,
+            logger=logger,
+            compute_descriptors=compute_descriptors,
+            bond_order_mode=bond_order_mode,
+        )
+    else:
+        monomers = build_monomers(
+            dataset=traj_dataset,
+            monomers_dict=monomers_dict,
+            logger=logger,
+            keep_only_monomer_names=keep_only_monomer_names,
+            compute_descriptors=compute_descriptors,
+        )
+        discovery_metadata = {
+            "mode": "legacy",
+            "monomer_names": sorted({monomer.name for monomer in monomers}),
+        }
+    with open(os.path.join(data_root, "monomer_discovery.json"), "w") as discovery_file:
+        json.dump(discovery_metadata, discovery_file, indent=2)
 
     # --- Create mapping between monomer indices and monomer names --- #
     # ---------------------------------------------------------------- #
     
-    build_topology(monomers, data_root)
+    build_topology(monomers, data_root, max_nmer_degree=max(nmer_sampling_conf))
 
     # ---------------------------------------------------------------- #
     # ---------------------------------------------------------------- #
@@ -211,8 +301,66 @@ def build_xyz_nmers(
         compute_descriptors=compute_descriptors,
         logger=logger,
         max_processes=max_processes,
+        keep_nmer_names=keep_nmer_names,
     )
     logger.info("- Completed building nmers!")
+
+def build_auto_monomers(
+        dataset: dict,
+        logger: Logger,
+        compute_descriptors: bool = True,
+        bond_order_mode: str = "auto",
+    ):
+    groups, discovery_metadata = discover_monomer_groups(
+        dataset,
+        mode=bond_order_mode,
+    )
+    atom_types = np.asarray(dataset["atom_type"])
+    atom_names = np.asarray(dataset["atom_name"])
+    atom_orig_indices = np.asarray(dataset["atom_orig_index"])
+    local_to_name = {
+        int(local_index): str(name)
+        for name, local_index in zip(
+            dataset["monomer_names"],
+            dataset["monomer_orig_atom_index"],
+        )
+    }
+
+    monomers = []
+    for monomer_id, heavy_atom_indices in enumerate(groups):
+        heavy_atom_names = [
+            local_to_name.get(index, f"{atom_types[index]}-{index}")
+            for index in heavy_atom_indices
+        ]
+        if len(heavy_atom_indices) == 1:
+            monomer_name = heavy_atom_names[0]
+        else:
+            monomer_name = "AUTO-" + "__".join(sorted(heavy_atom_names))
+        monomer = Monomer(
+            id=monomer_id,
+            name=monomer_name,
+            heavy_atoms_names=heavy_atom_names,
+            heavy_atoms_idcs=heavy_atom_indices,
+            orig_all_idcs=atom_orig_indices,
+            orig_all_bond_idcs=dataset["bond_orig_indices"],
+            orig_all_angle_idcs=dataset["angle_orig_indices"],
+            orig_all_dihedral_idcs=dataset["dihedral_orig_indices"],
+            orig_all_atom_names=atom_names,
+            orig_all_atom_types=atom_types,
+        )
+        if compute_descriptors:
+            monomer.compute_descriptors(orig_all_pos=dataset["position"])
+        monomers.append(monomer)
+
+    discovery_metadata["monomer_names"] = [monomer.name for monomer in monomers]
+    discovery_metadata["monomer_count"] = len(monomers)
+    logger.info(
+        "--- Automatic monomer discovery: %d cores, %d multiple bonds (%s) ---",
+        len(monomers),
+        len(discovery_metadata["multiple_bonds"]),
+        discovery_metadata["bond_order_evidence"]["source"],
+    )
+    return monomers, discovery_metadata
 
 def build_monomers(
         dataset: dict,
@@ -234,6 +382,13 @@ def build_monomers(
 
     # ----------- B U I L D   M O N O M E R S   D I C T -------------- #
     # ---------------------------------------------------------------- #
+
+    # Work on a copy: the legacy dictionary is a package constant and should
+    # not accumulate monomer types across independent workflow runs.
+    monomers_dict = {
+        key: dict(value)
+        for key, value in monomers_dict.items()
+    }
 
     # Configure excluded monomers
     excluded_monomers = set()
@@ -328,36 +483,37 @@ def monomers_are_valid(monomers_tuple):
         return False
     return True
 
-def build_topology(monomers: List[Monomer], data_root: str):
-        topology = {"monomers": {m.id: m.name for m in monomers}}
+def build_topology(monomers: List[Monomer], data_root: str, max_nmer_degree: Optional[int] = None):
+    max_nmer_degree = max_nmer_degree or max(DataDict.FOLDER_NAMES.keys())
+    topology = {"monomers": {m.id: m.name for m in monomers}}
 
-        def build_monomers_topology(monomers: List[Monomer], connections: List[str]):
-            output_mapping = {"connections": connections}
-            m_idcs = np.array([m.id for m in monomers])
-            if len(m_idcs) != len(np.unique(m_idcs)):
-                return output_mapping
-            connection = '_'.join([str(id) for id in np.sort(m_idcs)])
-            if connection in connections:
-                return output_mapping
-            for m1, m2 in zip(monomers[:-1], monomers[1:]):
-                if not np.any(np.isin(m1.orig_connected_atoms_idcs, m2.orig_heavy_atoms_idcs)):
-                    return output_mapping
-            connections.append(connection)
+    def build_monomers_topology(monomers: List[Monomer], connections: List[str]):
+        output_mapping = {"connections": connections}
+        m_idcs = np.array([m.id for m in monomers])
+        if len(m_idcs) != len(np.unique(m_idcs)):
             return output_mapping
+        connection = '_'.join([str(id) for id in np.sort(m_idcs)])
+        if connection in connections:
+            return output_mapping
+        for m1, m2 in zip(monomers[:-1], monomers[1:]):
+            if not np.any(np.isin(m1.orig_connected_atoms_idcs, m2.orig_heavy_atoms_idcs)):
+                return output_mapping
+        connections.append(connection)
+        return output_mapping
 
-        all_connections = {"connections": []}
-        for nmer_degree in range(2, max(DataDict.FOLDER_NAMES.keys())+1):
-            connections = dynamic_for_loop(
-                iterable=monomers,
-                num_for_loops=nmer_degree,
-                func=build_monomers_topology,
-                connections=[],
-            )
-            all_connections["connections"].extend(connections["connections"])
-        topology.update(all_connections)
+    all_connections = {"connections": []}
+    for nmer_degree in range(2, max_nmer_degree + 1):
+        connections = dynamic_for_loop(
+            iterable=monomers,
+            num_for_loops=nmer_degree,
+            func=build_monomers_topology,
+            connections=[],
+        )
+        all_connections["connections"].extend(connections["connections"])
+    topology.update(all_connections)
     
-        with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), "w") as topology_f:
-            json.dump(topology, topology_f, indent=4)
+    with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), "w") as topology_f:
+        json.dump(topology, topology_f, indent=4)
 
 def save_multimer(
     nmers_root: str,
@@ -397,8 +553,9 @@ def save_multimer(
     info_dict[f"severed_bonded_idcs"] = severed_bonded_idcs.tolist()
     
     coords = np.asarray(multimer_coords[multimer_sampled_indices])
-    atom_types = np.asarray(multimer_atom_types, dtype=np.string_)
-    fullnames  = np.asarray([f"{str(frame_id)}_{multimer.fullname}" for frame_id in multimer_sampled_indices], dtype=np.string_)
+    string_dtype = getattr(np, "string_", np.bytes_)
+    atom_types = np.asarray(multimer_atom_types, dtype=string_dtype)
+    fullnames  = np.asarray([f"{str(frame_id)}_{multimer.fullname}" for frame_id in multimer_sampled_indices], dtype=string_dtype)
 
     # Save to h5 file
     write_h5_file(h5_filename, coords, atom_types, fullnames, info_dict)
@@ -434,7 +591,9 @@ def build_multimer_recursively(
     logger: Logger,
     recursive_multimer_sampled_indices = None,
     compute_descriptors: bool = True,
-    max_processes: int = 0
+    max_processes: int = 0,
+    keep_nmer_names: Optional[List[str]] = None,
+    keep_nmer_order: Optional[int] = None,
 ):
     if n not in nmer_sampling_conf:
         return
@@ -450,6 +609,12 @@ def build_multimer_recursively(
 
         # - Create Multimer to join descriptors distributions of Monomers - #
         multimer = Multimer(monomers_tuple, orig_all_atom_types, logger=logger)
+        if (
+            keep_nmer_names is not None
+            and (keep_nmer_order is None or n == keep_nmer_order)
+            and multimer.name not in keep_nmer_names
+        ):
+            continue
         if compute_descriptors:
             multimer.compute_descriptors()
         multimers.append(multimer)
@@ -509,13 +674,15 @@ def build_multimer_recursively(
                 nmer_sampling_conf,
                 multimer._monomers,
                 n-1,
-                os.path.join(folder_name, DataDict.FOLDER_NAMES.get(n-1, "")),
+                os.path.join(folder_name, DataDict.folder_name(n - 1)),
                 orig_pos,
                 orig_all_atom_types,
                 logger,
                 recursive_multimer_sampled_indices,
                 compute_descriptors,
                 0,
+                keep_nmer_names,
+                keep_nmer_order,
             )
     else:
         with multiprocessing.Pool(processes=max_processes) as pool:
@@ -527,13 +694,15 @@ def build_multimer_recursively(
                         nmer_sampling_conf,
                         multimer._monomers,
                         n-1,
-                        os.path.join(folder_name, DataDict.FOLDER_NAMES.get(n-1, "")),
+                        os.path.join(folder_name, DataDict.folder_name(n - 1)),
                         orig_pos,
                         orig_all_atom_types,
                         logger,
                         recursive_multimer_sampled_indices,
                         compute_descriptors,
                         0,
+                        keep_nmer_names,
+                        keep_nmer_order,
                     )
                     for multimer, recursive_multimer_sampled_indices in zip(multimers, recursive_multimer_sampled_indices_list)
                 ]
@@ -604,9 +773,13 @@ def build_multimers(
     orig_all_atom_types: np.ndarray,
     compute_descriptors: bool,
     logger: Logger,
-    max_processes: int = 0
+    max_processes: int = 0,
+    keep_nmer_names: Optional[List[str]] = None,
 ):
-    for n, folder_name in DataDict.FOLDER_NAMES.items():
+    requested_orders = sorted(int(order) for order in nmer_sampling_conf)
+    highest_requested_order = max(requested_orders, default=None)
+    for n in requested_orders:
+        folder_name = DataDict.folder_name(n)
         logger.info(f"--- Building Multimers of order {n}...")
         build_multimer_recursively(
             nmers_root=nmers_root,
@@ -619,20 +792,57 @@ def build_multimers(
             logger=logger,
             compute_descriptors=compute_descriptors,
             max_processes=max_processes,
+            keep_nmer_names=keep_nmer_names,
+            keep_nmer_order=highest_requested_order,
         )
 
-def substitute_severed_atoms(all_coords, atom_types, info_dict: dict):
-    severed_idcs = info_dict.get("severed_idcs")
+def _distance_by_severed_order(info_dict: dict, capping_distances: Optional[dict]):
+    severed_idcs = np.asarray(info_dict.get("severed_idcs", []), dtype=int)
+    distances = [None] * len(severed_idcs)
+    if capping_distances is None:
+        return distances
+
+    source_indices = capping_distances.get("source_severed_indices", [])
+    measured_distances = capping_distances.get("distances", [])
+    for source_index, distance in zip(source_indices, measured_distances):
+        matches = np.flatnonzero(severed_idcs == int(source_index))
+        if len(matches) == 1:
+            distances[matches[0]] = float(distance)
+    return distances
+
+
+def substitute_severed_atoms(
+    all_coords,
+    atom_types,
+    info_dict: dict,
+    capping_distances: Optional[dict] = None,
+):
+    severed_idcs = np.asarray(info_dict.get("severed_idcs", []), dtype=int)
     nmer_idcs = np.delete(np.arange(all_coords.shape[1]), severed_idcs)
     nmer_coords = all_coords[:, nmer_idcs]
     severed_coords = all_coords[:, severed_idcs]
+    distances_by_severed_order = _distance_by_severed_order(info_dict, capping_distances)
+    severed_bonded_idcs = np.asarray(info_dict.get("severed_bonded_idcs", []), dtype=int)
+    if severed_bonded_idcs.ndim == 1 and len(severed_bonded_idcs) > 0:
+        severed_bonded_idcs = severed_bonded_idcs.reshape(1, -1)
 
     H_substituted_coords = np.zeros_like(severed_coords)
     for i, severed_atom_coords in enumerate(severed_coords.transpose(1, 0, 2)):
         distance_vectors = severed_atom_coords[:, None, :] - nmer_coords
         distances = np.linalg.norm(distance_vectors, axis=2)
-        severed_atom_neighbour_id = np.argmin(distances[0])
-        atom_type_H_distance = DataDict.ATOM_TYPE_TO_H_DISTANCE[atom_types[nmer_idcs][severed_atom_neighbour_id]]
+        neighbour_candidates = []
+        if i < len(severed_bonded_idcs):
+            neighbour_candidates = [int(x) for x in severed_bonded_idcs[i] if int(x) >= 0]
+        neighbour_candidates = [x for x in neighbour_candidates if x in set(nmer_idcs)]
+        if neighbour_candidates:
+            severed_atom_neighbour_id = int(np.flatnonzero(nmer_idcs == neighbour_candidates[0])[0])
+        else:
+            severed_atom_neighbour_id = np.argmin(distances[0])
+
+        atom_type = str(atom_types[nmer_idcs][severed_atom_neighbour_id])
+        atom_type_H_distance = distances_by_severed_order[i]
+        if atom_type_H_distance is None:
+            atom_type_H_distance = DataDict.ATOM_TYPE_TO_H_DISTANCE[atom_type]
         H_substituted_coords[:, i, :] = (
             nmer_coords[np.arange(nmer_coords.shape[0]), severed_atom_neighbour_id] +
             distance_vectors[np.arange(distance_vectors.shape[0]), severed_atom_neighbour_id] /
@@ -644,7 +854,14 @@ def substitute_severed_atoms(all_coords, atom_types, info_dict: dict):
 
     return all_coords, atom_types
 
-def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly_root: str, logger: Logger):
+def cap_nmer(
+    h5_filepath: str,
+    nmers_root: str,
+    nmers_capped_root: str,
+    fit_poly_root: str,
+    logger: Logger,
+    capping_distances: Optional[dict] = None,
+):
     h5_capped_filepath = h5_filepath.replace(nmers_root, nmers_capped_root)
     h5_capped_folder = dirname(h5_capped_filepath)
     os.makedirs(h5_capped_folder, exist_ok=True)
@@ -655,7 +872,12 @@ def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly
     coords, atom_types, fullnames, info_dict, _ = read_h5_file(h5_filepath)
 
     # Process the data
-    capped_coords, capped_atom_types = substitute_severed_atoms(coords, atom_types, info_dict)
+    capped_coords, capped_atom_types = substitute_severed_atoms(
+        coords,
+        atom_types,
+        info_dict,
+        capping_distances=capping_distances,
+    )
 
     # --
 
@@ -671,8 +893,27 @@ def cap_nmer(h5_filepath: str, nmers_root: str, nmers_capped_root: str, fit_poly
 
     capped_coords = result.pop('coords')
     capped_atom_types = result.pop('atom_types')
+    sort_idcs = np.asarray(result["symmetry_names_argsort"], dtype=int)
+    source_severed_indices = [int(x) for x in np.asarray(info_dict.get("severed_idcs", []), dtype=int)]
+    source_bonded_idcs = np.asarray(info_dict.get("severed_bonded_idcs", []), dtype=int)
+    capping_atom_indices = []
+    capping_bonded_indices = []
+    for i, source_index in enumerate(source_severed_indices):
+        reordered_index = int(np.flatnonzero(sort_idcs == source_index)[0])
+        capping_atom_indices.append(reordered_index)
+        bonded = source_bonded_idcs[i] if i < len(source_bonded_idcs) else []
+        bonded = [int(x) for x in np.asarray(bonded).reshape(-1) if int(x) >= 0]
+        if bonded and np.any(sort_idcs == bonded[0]):
+            capping_bonded_indices.append(int(np.flatnonzero(sort_idcs == bonded[0])[0]))
+        else:
+            capping_bonded_indices.append(-1)
+
     result.pop('symmetry_names_argsort')
-    info_dict = {}
+    info_dict = {
+        "capping_source_severed_indices": source_severed_indices,
+        "capping_atom_indices": capping_atom_indices,
+        "capping_bonded_indices": capping_bonded_indices,
+    }
 
     write_h5_file(h5_capped_filepath, capped_coords, capped_atom_types, fullnames, info_dict, **result)
 
@@ -754,6 +995,13 @@ def assign_symmetry_names_and_reorder(coords, atom_types, info_dict):
             antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT.get(atom_identity_sorted, None)
             if antosn is None:
                 antosn = DataDict.ATOM_SYMMETRY_NAMES_DICT_GENERAL.get(atom_identity_general_sorted)
+            if antosn is None:
+                # Keep arbitrary trajectory chemistries usable. The legacy
+                # table remains authoritative for known MB-Fit fragments;
+                # unknown local environments receive a deterministic label
+                # shared by equivalent atoms across n-mers.
+                digest = hashlib.sha1(atom_identity.encode("utf-8")).hexdigest()[:10].upper()
+                antosn = f"X{digest}"
             atom_name_to_symmetry_name[atom_identity_sorted] = antosn
 
     symmetry_names = np.array([

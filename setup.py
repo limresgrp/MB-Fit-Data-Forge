@@ -21,8 +21,11 @@ setup(
         "console_scripts": [
             "dataforge-parse-traj = dataforge.scripts.parse_traj:main",
             "dataforge-build-nmers = dataforge.scripts.build_nmers:main",
+            "dataforge-build-dataset = dataforge.scripts.build_dataset:main",
             "dataforge-fps = dataforge.scripts.fps:main",
             "dataforge-qchem = dataforge.scripts.qchem:main",
+            "dataforge-recap-nmers = dataforge.scripts.recap_nmers:main",
+            "dataforge-stage-metadata = dataforge.scripts.stage_metadata:main",
         ]
     },
     install_requires=[

@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 from dataforge.src import parse_slice
 from dataforge.src.logging import get_logger
+from dataforge.src.monomer_discovery import explicit_bond_orders
 
 
 def main(args=None):
@@ -89,6 +90,7 @@ def parse_trajectory(
     if multiple_mols_per_frame:
         dataset = extract_single_molecule(universe, dataset)
     logger.info(f"- {len(dataset['position'])} total frames featuring a single occurrence of molecule")
+    logger.info(f"- Bond-order metadata source: {dataset.get('bond_order_source', 'unavailable')}")
 
     u_monomers, count = np.unique(dataset['monomer_names'], return_counts=True)
     unique_monomers_formatted = ' | '.join([f"{c}x {m}" for m, c in zip(u_monomers, count)])
@@ -164,6 +166,23 @@ def extract_single_molecule(universe: mda.Universe, dataset: dict) -> Dict[str, 
     dataset = add_descriptor_indices('bond', dataset, atom_orig_index, universe.bonds.indices)
     dataset = add_descriptor_indices('angle', dataset, atom_orig_index, universe.angles.indices)
     dataset = add_descriptor_indices('dihedral', dataset, atom_orig_index, universe.dihedrals.indices)
+
+    # Preserve bond-order evidence when the topology format provides it. TPR
+    # files commonly do not, so automatic monomer discovery can later fall
+    # back to trajectory geometry and record that choice in metadata.
+    all_bond_orders, bond_order_source = explicit_bond_orders(universe, universe.bonds.indices)
+    if all_bond_orders is None:
+        dataset['bond_orders'] = np.full(len(dataset['bond_orig_indices']), np.nan)
+    else:
+        bond_order_map = {
+            tuple(sorted((int(left), int(right)))): float(order)
+            for (left, right), order in zip(universe.bonds.indices, all_bond_orders)
+        }
+        dataset['bond_orders'] = np.array([
+            bond_order_map.get(tuple(sorted((int(left), int(right)))), np.nan)
+            for left, right in dataset['bond_orig_indices']
+        ], dtype=float)
+    dataset['bond_order_source'] = np.array(bond_order_source)
 
     bond_interactions = {}
     for bond in dataset['bond_indices']:

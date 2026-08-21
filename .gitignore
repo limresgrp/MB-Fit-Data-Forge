@@ -1,5 +1,9 @@
 # Project related
 logs/
+.*
+nohup.out
+graphify-out/
+orca/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

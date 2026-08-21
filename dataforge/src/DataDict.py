@@ -9,6 +9,12 @@ FOLDER_NAMES = {
     3: "trimers",
 }
 
+
+def folder_name(nmer_order: int) -> str:
+    """Return the conventional folder name for an arbitrary n-mer order."""
+    nmer_order = int(nmer_order)
+    return FOLDER_NAMES.get(nmer_order, f"{nmer_order}mers")
+
 ATOM_TYPE_TO_H_DISTANCE = {
     'C': 1.086, # 1.086 C-HG, 1.092 HG-C=OO, 1.08 C=C-HG
     'N': 1.022, # 1.022 N-HG,

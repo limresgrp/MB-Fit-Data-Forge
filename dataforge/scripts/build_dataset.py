@@ -340,15 +340,13 @@ def build_fitting_dataset(
 ):
     save_optimized_structures(qchem_min_out_root, fit_optimized_root, fit_poly_root)
 
-
-
     all_energies_contrib_dict = {}
     with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), 'r') as topology_f:
         topology = json.load(topology_f)
     for k in range(1, max([k for k in delta_energies_dict.keys()]) + 1):
         df = delta_energies_dict[k]
         df['fullname'] = df.apply(lambda row: '_'.join([str(row['name'])] + [str(row[f'monomer_{i}']) for i in range(k)]) + '.h5', axis=1)
-        logger.info(f"-- Building  dataset for {DataDict.FOLDER_NAMES[k]} --")
+        logger.info(f"-- Building  dataset for {DataDict.folder_name(k)} --")
         
         # ------------------------------- Work one nmer at a time ---------------------------------- #
         for nmer_name in df["fullname"].unique():
@@ -360,12 +358,12 @@ def build_fitting_dataset(
                 nmer_capping_filename = os.path.join(nmers_capped_root, subfolder, nmer_name)
                 nmer_capping_folder = dirname(nmer_capping_filename)
                 out_filename = nmer_capping_filename.replace(nmers_capped_root, fit_dataset_root).replace('.h5', '.xyz')
-                nmer_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, fit_dataset_root)
+                nmer_fit_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, fit_dataset_root)
                 monomers_name = nmer_df.apply(lambda row: '_'.join([str(row[f'monomer_{i}']) for i in range(k)]), axis=1).unique()
                 assert len(monomers_name) == 1
                 monomers_name = monomers_name[0]
-                nmer_energy_contrib_csv = os.path.join(nmer_dataset_folder, f"{monomers_name}_{DataDict.ENERGY_FILENAME}")
-                nmer_energy_contrib_csv_kcal = os.path.join(nmer_dataset_folder, f"{monomers_name}_{DataDict.ENERGY_FILENAME_KCAL}")
+                nmer_energy_contrib_csv = os.path.join(nmer_fit_dataset_folder, f"{monomers_name}_{DataDict.ENERGY_FILENAME}")
+                nmer_energy_contrib_csv_kcal = os.path.join(nmer_fit_dataset_folder, f"{monomers_name}_{DataDict.ENERGY_FILENAME_KCAL}")
 
                 if os.path.isfile(nmer_energy_contrib_csv):
                     if rule_if_file_exists is DataDict.SKIP:
@@ -381,6 +379,11 @@ def build_fitting_dataset(
                         continue
                     if rule_if_file_exists not in [DataDict.APPEND, DataDict.OVERWRITE]:
                         raise ValueError()
+                    if rule_if_file_exists is DataDict.OVERWRITE:
+                        if os.path.isfile(out_filename):
+                            os.remove(out_filename)
+                        if os.path.isfile(nmer_energy_contrib_csv):
+                            os.remove(nmer_energy_contrib_csv)
 
                 # ------------- Iterate xyz_capped files inside nmer folder ------------------------ #
                 logger.info(f"--- Building  dataset for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
@@ -442,7 +445,7 @@ def build_fitting_dataset(
                     atoms.info = {key: val for key, val in zip(["total_energy", "nmer_energy", "binding_energy"], value)}
                     info = f"{value[1]} {value[2]} {h5_fullname}"
                     
-                    os.makedirs(nmer_dataset_folder, exist_ok=True)
+                    os.makedirs(nmer_fit_dataset_folder, exist_ok=True)
                     write(
                         out_filename,
                         atoms,
@@ -481,7 +484,7 @@ def build_fitting_dataset(
 
                     logger.info(f"--- Completed dataset for nmer {nmer_capping_folder.replace(nmers_capped_root, '')} ---")
                 # ---------------------------------------------------------------------------------- #
-        logger.info(f"-- Completed dataset for {DataDict.FOLDER_NAMES[k]} --")
+        logger.info(f"-- Completed dataset for {DataDict.folder_name(k)} --")
 
 def update_nmer_df(
     base_df: Optional[pd.DataFrame],
@@ -571,11 +574,19 @@ def save_optimized_structures(
             format="extxyz",
             append=False,
         )
-        append_connection_info_to_xyz_file(xyz_filename=out_filename, fit_poly_folder=dirname(out_filename).replace(fit_optimized_root, fit_poly_root))
+        collapsed_poly_folder = dirname(out_filename).replace(fit_optimized_root, fit_poly_root)
+        raw_poly_folder = dirname(filename.replace(qchem_min_out_root, fit_poly_root))
+        if os.path.isfile(apply_replacements_fp(os.path.join(collapsed_poly_folder, "poly_generator.py"))):
+            poly_folder = collapsed_poly_folder
+        else:
+            poly_folder = raw_poly_folder
+        append_connection_info_to_xyz_file(xyz_filename=out_filename, fit_poly_folder=poly_folder)
         fix_bonds(out_filename)
 
 def append_connection_info_to_xyz_file(xyz_filename: str, fit_poly_folder: str):
-    fit_poly_filename = apply_replacements_fp(os.path.join(fit_poly_folder, "poly_generator.py"))
+    fit_poly_filename = os.path.join(fit_poly_folder, "poly_generator.py")
+    if not os.path.isfile(fit_poly_filename):
+        fit_poly_filename = apply_replacements_fp(fit_poly_filename)
 
     pattern = re.compile(r"'(.*?)'")
     connections_list = []
@@ -611,14 +622,14 @@ def build_all_energies_contrib_dict(
 
     for k in sorted(delta_energies_dict.keys()):
         df = delta_energies_dict[k]
-        logger.info(f"-- Building dictionary for {DataDict.FOLDER_NAMES[k]} --")
+        logger.info(f"-- Building dictionary for {DataDict.folder_name(k)} --")
         
         # ------------------------------- Work one nmer at a time ---------------------------------- #
         for nmer_name in df["name"].unique():
             nmer_energy_contrib_df_total: Optional[pd.DataFrame] = all_energies_contrib_dict.get(nmer_name, None)
 
             # -------------------------- Iterate xyz_capped folders -------------------------------- #
-            nmer_capping_folder_regex = os.path.join(nmers_capped_root, "**", DataDict.FOLDER_NAMES[k], nmer_name)
+            nmer_capping_folder_regex = os.path.join(nmers_capped_root, "**", DataDict.folder_name(k), nmer_name)
             for nmer_capping_folder in glob.glob(nmer_capping_folder_regex, recursive=True):
                 nmer_dataset_folder = nmer_capping_folder.replace(nmers_capped_root, dataset_root)
                 nmer_energy_contrib_csv = os.path.join(nmer_dataset_folder, DataDict.ENERGY_FILENAME)
@@ -637,8 +648,7 @@ def build_all_energies_contrib_dict(
     logger.info("- Dictionary completed! -")
     return all_energies_contrib_dict
 
-
-if __name__ == "__main__":
+def main():
     # Create the argument parser
     parser = argparse.ArgumentParser(description="Run the build_dataset method with user-specified inputs.")
 
@@ -663,13 +673,13 @@ if __name__ == "__main__":
 
     # Prepare kwargs from optional arguments
     kwargs = {
-        'NMERS_CAPPED_ROOT': args.NMERS_CAPPED_ROOT,
-        'QCHEM_OUT_ROOT': args.QCHEM_OUT_ROOT,
+        'NMERS_CAPPED_ROOT':  args.NMERS_CAPPED_ROOT,
+        'QCHEM_OUT_ROOT':     args.QCHEM_OUT_ROOT,
         'QCHEM_MIN_OUT_ROOT': args.QCHEM_MIN_OUT_ROOT,
-        'DATASET_ROOT': args.DATASET_ROOT,
-        'FIT_DATASET_ROOT': args.FIT_DATASET_ROOT,
-        'FIT_OPTIM_ROOT': args.FIT_OPTIM_ROOT,
-        'FIT_POLY_ROOT': args.FIT_POLY_ROOT
+        'DATASET_ROOT':       args.DATASET_ROOT,
+        'FIT_DATASET_ROOT':   args.FIT_DATASET_ROOT,
+        'FIT_OPTIM_ROOT':     args.FIT_OPTIM_ROOT,
+        'FIT_POLY_ROOT':      args.FIT_POLY_ROOT
     }
 
     # Call the function with parsed arguments
@@ -679,3 +689,6 @@ if __name__ == "__main__":
         rule_if_file_exists=args.rule_if_file_exists,
         **{k: v for k, v in kwargs.items() if v is not None}
     )
+
+if __name__ == "__main__":
+    main()

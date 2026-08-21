@@ -38,7 +38,12 @@ def dynamic_for_loop(iterable, num_for_loops, func: Callable, args: List = [], *
         return extra_args
 
 def union_rows_2d(arr1, arr2):
+    arr1 = np.asarray(arr1)
+    arr2 = np.asarray(arr2)
+    if arr1.ndim != 2:
+        raise ValueError(f"Expected the first array to be 2D, got shape {arr1.shape}.")
     nrows, ncols = arr1.shape
+    arr2 = arr2.reshape(-1, ncols).astype(arr1.dtype, copy=False)
     dtype={'names':['f{}'.format(i) for i in range(ncols)],
         'formats':ncols * [arr1.dtype]}
 
@@ -48,7 +53,12 @@ def union_rows_2d(arr1, arr2):
     return C.view(arr1.dtype).reshape(-1, ncols)
 
 def intersect_rows_2d(arr1, arr2):
+    arr1 = np.asarray(arr1)
+    arr2 = np.asarray(arr2)
+    if arr1.ndim != 2:
+        raise ValueError(f"Expected the first array to be 2D, got shape {arr1.shape}.")
     nrows, ncols = arr1.shape
+    arr2 = arr2.reshape(-1, ncols).astype(arr1.dtype, copy=False)
     dtype={'names':['f{}'.format(i) for i in range(ncols)],
         'formats':ncols * [arr1.dtype]}
 
@@ -155,8 +165,9 @@ def write_h5_file(
 ):
     with h5py.File(h5_filepath, 'w') as h5f:
         h5f.create_dataset('coords',     data=coords)
-        h5f.create_dataset('atom_types', data=atom_types.astype(np.string_))
-        h5f.create_dataset('fullnames',  data=fullnames.astype(np.string_))
+        string_dtype = getattr(np, "string_", np.bytes_)
+        h5f.create_dataset('atom_types', data=atom_types.astype(string_dtype))
+        h5f.create_dataset('fullnames',  data=fullnames.astype(string_dtype))
         
         # Convert info_dict to JSON string and save it
         info_dict_json = json.dumps(info_dict)
@@ -164,6 +175,7 @@ def write_h5_file(
         
         for k, v in kwargs.items():
             if isinstance(v, np.ndarray):
-                 h5f.create_dataset(k, data=v.astype(np.string_))
+                 string_dtype = getattr(np, "string_", np.bytes_)
+                 h5f.create_dataset(k, data=v.astype(string_dtype))
             else:
                 h5f.create_dataset(k, data=json.dumps(v))
