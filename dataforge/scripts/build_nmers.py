@@ -522,7 +522,8 @@ def save_multimer(
     multimer_sampled_indices: Optional[np.ndarray],
     multimer_coords: np.ndarray,
     multimer_atom_types: np.ndarray,
-    logger: Logger
+    logger: Logger,
+    coords_are_sampled: bool = False,
 ):
 
     # - Create folder - #
@@ -552,7 +553,10 @@ def save_multimer(
     info_dict[f"severed_idcs"] = severed_idcs.tolist()
     info_dict[f"severed_bonded_idcs"] = severed_bonded_idcs.tolist()
     
-    coords = np.asarray(multimer_coords[multimer_sampled_indices])
+    if coords_are_sampled:
+        coords = np.asarray(multimer_coords)
+    else:
+        coords = np.asarray(multimer_coords[multimer_sampled_indices])
     string_dtype = getattr(np, "string_", np.bytes_)
     atom_types = np.asarray(multimer_atom_types, dtype=string_dtype)
     fullnames  = np.asarray([f"{str(frame_id)}_{multimer.fullname}" for frame_id in multimer_sampled_indices], dtype=string_dtype)
@@ -624,9 +628,26 @@ def build_multimer_recursively(
         multimers_occurrence[multimer.name] = counts
         multimers_first_occurrence[multimer.name] = True
 
+    prepared_tasks = []
+    for multimer in multimers:
+        sampled_indices = select_multimer_sampled_indices(
+            multimer=multimer,
+            n_samples=n_samples,
+            method=method,
+            multimers_occurrence=multimers_occurrence,
+            multimers_first_occurrence=multimers_first_occurrence,
+            recursive_multimer_sampled_indices=recursive_multimer_sampled_indices,
+        )
+        # Select frames before selecting atoms. This keeps multiprocessing
+        # tasks proportional to the requested sample count, rather than to
+        # the full trajectory length.
+        task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
+        task_coords = task_coords[:, multimer.orig_all_atoms_idcs]
+        prepared_tasks.append((multimer, sampled_indices, task_coords))
+
     if max_processes <= 1:
         result = []
-        for multimer in multimers:
+        for multimer, sampled_indices, task_coords in prepared_tasks:
             res = process_multimer(
                 multimer,
                 nmers_root,
@@ -635,9 +656,10 @@ def build_multimer_recursively(
                 method,
                 multimers_occurrence,
                 multimers_first_occurrence,
-                orig_pos[:, multimer.orig_all_atoms_idcs],
+                task_coords,
                 orig_all_atom_types[multimer.orig_all_atoms_idcs],
                 recursive_multimer_sampled_indices,
+                sampled_indices,
             )
             result.append(res)
     else:
@@ -653,11 +675,12 @@ def build_multimer_recursively(
                         method,
                         multimers_occurrence,
                         multimers_first_occurrence,
-                        orig_pos[:, multimer.orig_all_atoms_idcs],
+                        task_coords,
                         orig_all_atom_types[multimer.orig_all_atoms_idcs],
                         recursive_multimer_sampled_indices,
+                        sampled_indices,
                     )
-                    for multimer in multimers
+                    for multimer, sampled_indices, task_coords in prepared_tasks
                 ]
             )
     
@@ -735,6 +758,26 @@ def parse_nmer_sampling_conf(x):
 def configure_logging():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(process)d - %(levelname)s - %(message)s')
 
+def select_multimer_sampled_indices(
+    multimer: Multimer,
+    n_samples: Optional[int],
+    method: str,
+    multimers_occurrence: dict,
+    multimers_first_occurrence: dict,
+    recursive_multimer_sampled_indices,
+):
+    """Choose frame indices before any coordinate array is materialized."""
+    if recursive_multimer_sampled_indices is not None:
+        return recursive_multimer_sampled_indices
+    if n_samples is None:
+        return None
+
+    multimer_n_samples = n_samples // multimers_occurrence.get(multimer.name)
+    if multimers_first_occurrence.get(multimer.name):
+        multimer_n_samples += n_samples % multimers_occurrence.get(multimer.name)
+        multimers_first_occurrence[multimer.name] = False
+    return multimer.sample(multimer_n_samples, method=method)
+
 def process_multimer(
     multimer: Multimer,
     nmers_root,
@@ -746,12 +789,15 @@ def process_multimer(
     multimer_coords,
     multimer_atom_types,
     recursive_multimer_sampled_indices,
+    sampled_indices_override=None,
 ):
     configure_logging()
     logger = logging.getLogger()
     logger.info(f"--- Saving {multimer.h5_filename} to {folder_name}...")
 
-    if recursive_multimer_sampled_indices is not None:
+    if sampled_indices_override is not None:
+        multimer_sampled_indices = sampled_indices_override
+    elif recursive_multimer_sampled_indices is not None:
         multimer_sampled_indices = recursive_multimer_sampled_indices
     elif n_samples is None:
         multimer_sampled_indices = None
@@ -762,7 +808,16 @@ def process_multimer(
             multimers_first_occurrence[multimer.name] = False
         multimer_sampled_indices = multimer.sample(multimer_n_samples, method=method)
 
-    save_multimer(nmers_root, folder_name, multimer, multimer_sampled_indices, multimer_coords, multimer_atom_types, logger)
+    save_multimer(
+        nmers_root,
+        folder_name,
+        multimer,
+        multimer_sampled_indices,
+        multimer_coords,
+        multimer_atom_types,
+        logger,
+        coords_are_sampled=True,
+    )
     return multimer, multimer_sampled_indices
 
 def build_multimers(
