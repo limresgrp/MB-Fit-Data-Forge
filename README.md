@@ -36,7 +36,7 @@ Alternatively, create the project virtual environment and install the repository
 source .venv/bin/activate
 ```
 
-The setup script accepts `PYTHON_BIN` to select the Python executable and `VENV_DIR` to choose a different environment location.
+The setup script looks for `python3.11`, then `python3.10`, then `python3`. This also handles systems where interactive aliases point `python`/`python3` to a newer interpreter, since aliases are not inherited by shell scripts. If the selected interpreter is older than Python 3.10, the script reports the detected version and exits. Set `PYTHON_BIN` to select another Python executable, and use `VENV_DIR` to choose a different environment location.
 
 ## Usage ##
 
@@ -93,6 +93,8 @@ Run the single interactive workflow from the repository root:
 ```
 
 This is the only workflow shell script. It starts by creating the parsed trajectory dataset using the same inputs as `01_parse_traj.ipynb`: reference topology, trajectory files, atom selection, and trajectory slice. If a parsed `.npz` already exists, the script offers to reuse it. It then guides n-mer sampling, minimization-input preparation, parallel QChem minimizations, extraction of capping-H distances from minimized structures, re-capping, parallel single-point QChem calculations, and final energy-contribution/dataset generation. Orders above three use folders such as `4mers`, `5mers`, and so on.
+
+If n-mer files already exist, the script asks whether to recompute them; if none exist, the build prompt defaults to yes. For multi-gigabyte trajectories, n-mer construction automatically switches to one build process to avoid multiplying large coordinate arrays across workers. The QChem and capping stages can still use parallel workers.
 
 The first dataset-root prompt defaults to the repository root. The selected absolute path is saved in `.dataforge_workflow_root` and becomes the default on subsequent calls, so later runs can resume the same dataset. The parsed trajectory defaults to `<dataset-root>/data/trajectory.npz`.
 

@@ -776,6 +776,20 @@ def build_multimers(
     max_processes: int = 0,
     keep_nmer_names: Optional[List[str]] = None,
 ):
+    # Each multiprocessing task currently receives a frame-by-atom coordinate
+    # slice. For multi-gigabyte trajectories, constructing those slices for
+    # many monomers at once can multiply memory use dramatically. Keep the
+    # build deterministic and memory-bounded; capping/QChem stages can still
+    # use their requested parallelism afterwards.
+    large_trajectory_bytes = 2 * 1024**3
+    if max_processes > 1 and orig_pos.nbytes > large_trajectory_bytes:
+        logger.warning(
+            "Trajectory coordinate array is %.2f GiB; serializing n-mer "
+            "construction to avoid multiprocessing memory amplification.",
+            orig_pos.nbytes / 1024**3,
+        )
+        max_processes = 1
+
     requested_orders = sorted(int(order) for order in nmer_sampling_conf)
     highest_requested_order = max(requested_orders, default=None)
     for n in requested_orders:

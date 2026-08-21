@@ -141,7 +141,22 @@ if [[ -n "$KEEP_NMER_LINE" ]]; then read -r -a KEEP_NMER_NAMES <<<"$KEEP_NMER_LI
 SAMPLING_SPECS=()
 for order in $ORDER; do SAMPLING_SPECS+=("${order}=${SAMPLE_COUNT}:${SAMPLE_METHOD}"); done
 
-if ask_yes_no "Build and initially cap the sampled n-mers?"; then
+BUILD_NMERS=false
+EXISTING_NMER_FILE=""
+if [[ -d "$DATASET_ROOT/data/xyz" ]]; then
+    EXISTING_NMER_FILE=$(find "$DATASET_ROOT/data/xyz" -type f -name '*.h5' -print -quit)
+fi
+if [[ -n "$EXISTING_NMER_FILE" ]]; then
+    if ask_yes_no "Existing n-mer files found. Recompute them?" n; then
+        BUILD_NMERS=true
+    fi
+else
+    if ask_yes_no "Build and initially cap the sampled n-mers?" y; then
+        BUILD_NMERS=true
+    fi
+fi
+
+if [[ "$BUILD_NMERS" == true ]]; then
     BUILD_ARGS=(-m dataforge.scripts.build_nmers build --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --sampling "${SAMPLING_SPECS[@]}" --monomer-mode "$MONOMER_MODE" --bond-order-mode "$BOND_ORDER_MODE" --max-processes "$BUILD_WORKERS")
     if ((${#KEEP_NMER_NAMES[@]})); then BUILD_ARGS+=(--keep-nmer-names "${KEEP_NMER_NAMES[@]}"); fi
     run_logged build_nmers "$PYTHON" "${BUILD_ARGS[@]}"
