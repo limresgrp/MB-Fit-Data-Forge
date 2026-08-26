@@ -131,6 +131,7 @@ def prepare_qchem_input(
         skip_if_not_frame_filter: bool = True,
         minimization_only: bool = False,
         create_minimization_inputs: bool = True,
+        selected_nmer_names=None,
 ):
     if logger is None:
         import logging
@@ -139,8 +140,13 @@ def prepare_qchem_input(
     logger.info("- Preparing QChem input files...")
 
     h5_filepaths = sorted(glob.iglob(os.path.join(nmers_capped_root, "**/*.h5"), recursive=True))
+    if selected_nmer_names is not None:
+        selected = set(selected_nmer_names)
+        h5_filepaths = [
+            path for path in h5_filepaths if basename(dirname(path)) in selected
+        ]
     if not h5_filepaths:
-        raise FileNotFoundError(f"No capped HDF5 files found under {nmers_capped_root}")
+        raise FileNotFoundError(f"No selected capped HDF5 files found under {nmers_capped_root}")
 
     if minimization_only:
         # A folder represents one n-mer type. Select one occurrence and one

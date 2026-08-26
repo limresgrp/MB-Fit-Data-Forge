@@ -92,21 +92,21 @@ Run the single interactive workflow from the repository root:
 ./scripts/qchem_workflow.sh
 ```
 
-This is the only workflow shell script. It starts by creating the parsed trajectory dataset using the same inputs as `01_parse_traj.ipynb`: reference topology, trajectory files, atom selection, and trajectory slice. If a parsed `.npz` already exists, the script offers to reuse it. It then guides n-mer sampling, minimization-input preparation, parallel QChem minimizations, extraction of capping-H distances from minimized structures, re-capping, parallel single-point QChem calculations, and final energy-contribution/dataset generation. Orders above three use folders such as `4mers`, `5mers`, and so on.
+This is the only workflow shell script. After selecting the dataset root, it displays a numbered menu. Each invocation performs only the operation selected: trajectory parsing, monomer discovery/naming, XYZ sampling, initial capping, minimization preparation/execution, distance extraction, corrected capping, final QChem preparation/execution, or final dataset construction. After an operation finishes, the menu is displayed again. Orders above three use folders such as `4mers`, `5mers`, and so on.
 
-If n-mer files already exist, the script asks whether to recompute them; if none exist, the build prompt defaults to yes. For multi-gigabyte trajectories, n-mer construction automatically switches to one build process to avoid multiplying large coordinate arrays across workers. The QChem and capping stages can still use parallel workers.
+Every operation that acts on n-mer types displays a numbered list. Press Enter for all types, or enter comma-separated numbers and ranges such as `3,4,6-8`. The chosen type names are passed to the underlying Python stage and recorded in its stage metadata. When building final energy contributions, include the lower-order monomers and multimers required by any selected higher-order n-mer.
+
+XYZ sampling and initial capping are separate menu operations. For multi-gigabyte trajectories, n-mer construction automatically switches to one build process to avoid multiplying large coordinate arrays across workers. The QChem and capping stages can still use parallel workers.
 
 Uniform sampling (`US`) is the workflow default. `FPS` uses a bounded two-stage implementation: descriptor-quantile preselection over the complete trajectory followed by furthest-point sampling on at most 50,000 candidates. It does not run DBSCAN over every trajectory frame. Descriptor arrays are computed and released one n-mer at a time, and serial builds likewise slice one sampled coordinate block at a time.
 
-If sampling completed but initial capping was interrupted, rerun the workflow and keep the existing n-mers. It detects an incomplete `data/xyz_capped` tree and defaults to resuming capping. Calibrated C/N/O cap distances are retained; other supported elements use the sum of covalent radii as the initial minimization guess, and each capped HDF5 records the applied distances and their source.
-
-On restart, the workflow detects the parsed NPZ and sampled XYZ/HDF5 trees independently. It first asks whether to recreate the NPZ. When sampled n-mers already exist, choose `continue` to leave them untouched and proceed to capping/QChem, or `sample-more` to rebuild selected n-mers with a larger target total. The latter estimates the existing per-name target and defaults to twice that number.
+If sampling completed but initial capping was interrupted, choose operation 4 and select only the missing n-mer types. Calibrated C/N/O cap distances are retained; other supported elements use the sum of covalent radii as the initial minimization guess, and each capped HDF5 records the applied distances and their source.
 
 The first dataset-root prompt defaults to the repository root. The selected absolute path is saved in `.dataforge_workflow_root` and becomes the default on subsequent calls, so later runs can resume the same dataset. The parsed trajectory defaults to `<dataset-root>/data/trajectory.npz`.
 
-By default, `dataforge-build-nmers`/the workflow uses automatic monomer discovery. Each monomer starts as a heavy atom plus its bonded hydrogens; heavy atoms joined by an inferred or topology-provided double/triple bond are merged into one monomer. The discovery evidence is saved in `data/monomer_discovery.json`. Use `--monomer-mode legacy` only when reproducing a pre-existing configured composite-monomer definition, and provide `--bond-order-mode topology` or `geometry` when you want to force a particular bond-order source. For topology formats without bond orders (including common TPR inputs), `auto` records the fallback geometry inference and its distance evidence.
+By default, `dataforge-build-nmers`/the workflow uses automatic monomer discovery. Each monomer starts as a heavy atom plus its bonded hydrogens; heavy atoms joined by an inferred or topology-provided double/triple bond are merged into one monomer. Operation 2 asks for a readable name for every `AUTO-*` type; pressing Enter retains the automatic name. Aliases are saved in `metadata/monomer_aliases.json`, reused on later runs, and applied before n-mer paths and metadata are generated. Discovery evidence and the connected n-mer candidate catalog are saved in `data/monomer_discovery.json`. Use `--monomer-mode legacy` only when reproducing a pre-existing configured composite-monomer definition, and provide `--bond-order-mode topology` or `geometry` when you want to force a particular bond-order source.
 
-The corrected capped structures are written below `data/xyz_capped_minimized/`. The measured distances are recorded in `data/capping_distances.json`, so the re-capping step is auditable and repeatable.
+The corrected capped structures are written below `data/xyz_capped_minimized/`. The measured distances are recorded in `data/capping_distances.json`. Each HDF5 entry contains a `capping_atoms` record for every cap, including cap and bonded-heavy-atom indices/types, the original severed-atom index, the distance, and the explicit `angstrom` unit. Repeated subset runs merge their records into the same file.
 
 The underlying non-interactive command is:
 
@@ -127,6 +127,8 @@ python -m dataforge.scripts.recap_nmers apply \
 The initial minimization pass uses the element-based cap lengths to obtain minimized reference structures; only the subsequent full-dataset pass uses the measured minimized distances.
 
 Minimization preparation writes one `jobtype opt` input per n-mer folder directly into `data/qchem_min_input`; it does not require the legacy `.list` files from `03_sample_dataset.ipynb`. The final preparation pass writes `jobtype sp` inputs for every frame already sampled into the corrected HDF5 files. Input preparation fails visibly if no capped HDF5 files or no selected frames are found.
+
+Before launching workers, the workflow verifies that `qchem` is on `PATH`, `QCSCRATCH` is writable, and the Q-Chem executable has no unresolved shared-library dependencies. Worker failures preserve their output and are reported through each folder's `qchem-worker.log`; completed outputs are safely skipped on reruns.
 
 Every guided stage writes a log under `metadata/logs/`, a stage manifest under `metadata/stages/`, and an append-only history in `metadata/pipeline.jsonl`. Manifests include parameters, input/output existence and sizes, hashes for small files, the Python executable, platform, and repository revision. The metadata command can also be used independently:
 

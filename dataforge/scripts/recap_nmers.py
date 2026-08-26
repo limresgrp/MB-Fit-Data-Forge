@@ -123,12 +123,20 @@ def extract_capping_distances(
     output_filename: str,
     source_root: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
+    selected_nmer_names=None,
 ):
     logger = logger or logging.getLogger(__name__)
     files = {}
     missing = []
 
-    for h5_path in sorted(glob.glob(os.path.join(capped_root, "**", "*.h5"), recursive=True)):
+    selected = set(selected_nmer_names) if selected_nmer_names is not None else None
+    h5_paths = sorted(glob.glob(os.path.join(capped_root, "**", "*.h5"), recursive=True))
+    if selected is not None:
+        h5_paths = [path for path in h5_paths if os.path.basename(os.path.dirname(path)) in selected]
+    if not h5_paths:
+        raise FileNotFoundError(f"No selected capped HDF5 files found under {capped_root}")
+
+    for h5_path in h5_paths:
         relative = os.path.relpath(h5_path, capped_root)
         opt_path = _optimized_path(h5_path, capped_root, optimized_root)
         if not os.path.isfile(opt_path):
@@ -178,21 +186,51 @@ def extract_capping_distances(
         if len(source_severed_indices) != len(distances):
             source_severed_indices = []
 
+        source_indices_or_none = source_severed_indices or [None] * len(cap_indices)
+        capping_atoms = []
+        for cap_index, bonded_index, source_index, distance in zip(
+            cap_indices, bonded_indices, source_indices_or_none, distances
+        ):
+            capping_atoms.append({
+                "capping_atom_index": int(cap_index),
+                "capping_atom_type": str(atom_types[cap_index]),
+                "bonded_atom_index": int(bonded_index),
+                "bonded_atom_type": str(atom_types[bonded_index]),
+                "source_severed_index": None if source_index is None else int(source_index),
+                "distance_angstrom": float(distance),
+            })
+
         files[relative] = {
             "capping_atom_indices": cap_indices,
             "capping_bonded_indices": bonded_indices,
             "source_severed_indices": source_severed_indices,
             "distances": distances,
+            "distance_unit": "angstrom",
+            "capping_atoms": capping_atoms,
         }
 
     if missing:
         logger.warning("Missing minimized structures for %d capped H5 files.", len(missing))
+    previous_files = {}
+    previous_missing = []
+    if os.path.isfile(output_filename):
+        with open(output_filename) as previous_file:
+            previous = json.load(previous_file)
+        previous_files = previous.get("files", {})
+        previous_missing = previous.get("missing_optimized", [])
+    previous_files.update(files)
+    selected_relatives = {
+        os.path.relpath(path, capped_root) for path in h5_paths
+    }
+    merged_missing = sorted(
+        (set(previous_missing) - selected_relatives) | set(missing)
+    )
     output = {
-        "version": 1,
+        "version": 2,
         "capped_root": os.path.abspath(capped_root),
         "optimized_root": os.path.abspath(optimized_root),
-        "files": files,
-        "missing_optimized": missing,
+        "files": previous_files,
+        "missing_optimized": merged_missing,
     }
     os.makedirs(os.path.dirname(os.path.abspath(output_filename)), exist_ok=True)
     with open(output_filename, "w") as f:
@@ -207,12 +245,18 @@ def apply_capping_distances(
     distances_filename: str,
     max_processes: int = 0,
     logger: Optional[logging.Logger] = None,
+    selected_nmer_names=None,
 ):
     logger = logger or logging.getLogger(__name__)
     with open(distances_filename) as f:
         distance_data = json.load(f)
 
     h5_paths = sorted(glob.glob(os.path.join(source_root, "**", "*.h5"), recursive=True))
+    if selected_nmer_names is not None:
+        selected = set(selected_nmer_names)
+        h5_paths = [path for path in h5_paths if os.path.basename(os.path.dirname(path)) in selected]
+    if not h5_paths:
+        raise FileNotFoundError(f"No selected source HDF5 files found under {source_root}")
     for h5_path in h5_paths:
         relative = os.path.relpath(h5_path, source_root)
         entry = distance_data.get("files", {}).get(relative)
@@ -244,6 +288,7 @@ def main(args=None):
     extract_parser.add_argument("--fit-poly-root", default=None)
     extract_parser.add_argument("--source-root", default=None)
     extract_parser.add_argument("--output", required=True)
+    extract_parser.add_argument("--nmer-names", nargs="+", default=None)
 
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--source-root", required=True)
@@ -251,6 +296,7 @@ def main(args=None):
     apply_parser.add_argument("--fit-poly-root", required=True)
     apply_parser.add_argument("--distances", required=True)
     apply_parser.add_argument("--max-processes", type=int, default=0)
+    apply_parser.add_argument("--nmer-names", nargs="+", default=None)
 
     parsed = parser.parse_args(args)
     logger = get_logger("recap_nmers.log")
@@ -260,6 +306,7 @@ def main(args=None):
                 parsed.min_output_root,
                 parsed.optimized_root,
                 parsed.fit_poly_root or "",
+                selected_nmer_names=parsed.nmer_names,
             )
         extract_capping_distances(
             parsed.capped_root,
@@ -267,6 +314,7 @@ def main(args=None):
             parsed.output,
             source_root=parsed.source_root,
             logger=logger,
+            selected_nmer_names=parsed.nmer_names,
         )
     else:
         apply_capping_distances(
@@ -276,6 +324,7 @@ def main(args=None):
             parsed.distances,
             max_processes=parsed.max_processes,
             logger=logger,
+            selected_nmer_names=parsed.nmer_names,
         )
 
 

@@ -24,6 +24,7 @@ def build_dataset(
     dataset_root: str,
     nmer_folder: Optional[str] = None,
     rule_if_file_exists: int = DataDict.SKIP,
+    selected_nmer_names: Optional[List[str]] = None,
     **kwargs,
 ):
     logger = get_logger('03_build_dataset.log')
@@ -43,12 +44,14 @@ def build_dataset(
         qchem_out_root=QCHEM_OUT_ROOT,
         nmer_folder=nmer_folder,
         logger=logger,
+        selected_nmer_names=selected_nmer_names,
     )
 
     logger.info("- Reading/bulding energy.csv files of energy-minimized nmers -")
     minimised_energy_dict = build_energy_dict(
         qchem_out_root=QCHEM_MIN_OUT_ROOT,
         logger=logger,
+        selected_nmer_names=selected_nmer_names,
     )
 
     logger.info("- Computing nmers contribution energy relative to minimized structure -")
@@ -57,6 +60,7 @@ def build_dataset(
         qchem_min_out_root=QCHEM_MIN_OUT_ROOT,
         energy_dict=energy_dict,
         minimised_energy_dict=minimised_energy_dict,
+        selected_nmer_names=selected_nmer_names,
     )
 
     if len(delta_energies_dict) == 0:
@@ -75,6 +79,7 @@ def build_dataset(
         delta_energies_dict=delta_energies_dict,
         rule_if_file_exists=rule_if_file_exists,
         logger=logger,
+        selected_nmer_names=selected_nmer_names,
     )
     logger.info("- Completed building fitting/dataset! -")
 
@@ -82,6 +87,7 @@ def build_energy_dict(
     qchem_out_root: str,
     logger: logging.Logger,
     nmer_folder: Optional[str] = None,
+    selected_nmer_names: Optional[List[str]] = None,
 ) -> Dict[int, pd.DataFrame]:
     # energy_dict:
     #   key: nmer degree (1 for monomers, 2 for dimers...)
@@ -100,7 +106,10 @@ def build_energy_dict(
     nmer_df_loaded = False
     last_nmer_folder = ""
     # ------------------------- Iterate qchem output files ----------------------------- #
+    selected = set(selected_nmer_names) if selected_nmer_names is not None else None
     for filename in glob.glob(os.path.join(qchem_out_root, folder_regex), recursive=True):
+        if selected is not None and basename(dirname(filename)) not in selected:
+            continue
         bname = basename(filename)              # f{num_frame}-{monomer_id1}[_{monomer_id2}[_{monomer_id3}[...]]].out
         frame_id, nmer_idcs = bname.split('-')  # split frame number and nmer_idcs
         nmer_idcs = nmer_idcs.split('.')[0]     # remove extension .out
@@ -218,6 +227,7 @@ def build_delta_energies_dict(
     qchem_min_out_root: str,
     energy_dict: dict,
     minimised_energy_dict: dict,
+    selected_nmer_names: Optional[List[str]] = None,
 ):
     delta_energies_dict = {}
 
@@ -235,7 +245,10 @@ def build_delta_energies_dict(
 
         # Extract monomers that have different names but same minimised structure
         monomers_associations = []
+        selected = set(selected_nmer_names) if selected_nmer_names is not None else None
         for min_filename in glob.glob(os.path.join(qchem_min_out_root, "**/*.out"), recursive=True):
+            if selected is not None and basename(dirname(min_filename)) not in selected:
+                continue
             min_monomers = basename(min_filename).split('.')[0].split('-')[-1].split('_')
             if len(min_monomers) != k:
                 continue
@@ -337,8 +350,14 @@ def build_fitting_dataset(
     delta_energies_dict: dict,
     logger: logging.Logger,
     rule_if_file_exists: int = DataDict.SKIP,
+    selected_nmer_names: Optional[List[str]] = None,
 ):
-    save_optimized_structures(qchem_min_out_root, fit_optimized_root, fit_poly_root)
+    save_optimized_structures(
+        qchem_min_out_root,
+        fit_optimized_root,
+        fit_poly_root,
+        selected_nmer_names=selected_nmer_names,
+    )
 
     all_energies_contrib_dict = {}
     with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), 'r') as topology_f:
@@ -528,8 +547,12 @@ def save_optimized_structures(
         qchem_min_out_root: str,
         fit_optimized_root: str,
         fit_poly_root: str,
+        selected_nmer_names: Optional[List[str]] = None,
     ):
+    selected = set(selected_nmer_names) if selected_nmer_names is not None else None
     for filename in glob.glob(os.path.join(qchem_min_out_root, "**/*.out"), recursive=True):
+        if selected is not None and basename(dirname(filename)) not in selected:
+            continue
         out_filename = os.path.join(dirname(filename.replace(qchem_min_out_root, fit_optimized_root)), "nmers.opt")
         out_filename = apply_replacements_fp(out_filename)
         if os.path.isfile(out_filename):
@@ -658,6 +681,7 @@ def main():
     # Optional arguments
     parser.add_argument('--nmer_folder', type=str, help="The nmer folder, optional", default=None)
     parser.add_argument('--rule_if_file_exists', type=int, help="Rule for handling existing files (default is 0)", default=0)
+    parser.add_argument('--nmer-names', nargs='+', default=None, help="Optional exact n-mer type names to process")
     
     # Optional kwargs
     parser.add_argument('--NMERS_CAPPED_ROOT', type=str, help="Optional path for NMERS_CAPPED_ROOT", default=None)
@@ -687,6 +711,7 @@ def main():
         dataset_root=args.dataset_root,
         nmer_folder=args.nmer_folder,
         rule_if_file_exists=args.rule_if_file_exists,
+        selected_nmer_names=args.nmer_names,
         **{k: v for k, v in kwargs.items() if v is not None}
     )
 

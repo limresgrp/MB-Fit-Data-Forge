@@ -4,6 +4,7 @@ import logging
 import os
 import glob
 import json
+import re
 from pathlib import Path
 import numpy as np
 import multiprocessing
@@ -24,8 +25,18 @@ from dataforge.src.monomer_discovery import COVALENT_RADII, discover_monomer_gro
 
 def main(args=None):
     args = parse_command_line(args)
+    aliases = load_monomer_aliases(args.monomer_aliases_json)
 
-    if args.mode == 'build':
+    if args.mode == 'discover':
+        discover_monomers(
+            input_filename=args.input,
+            dataset_root=args.root,
+            monomer_mode=args.monomer_mode,
+            bond_order_mode=args.bond_order_mode,
+            monomer_aliases=aliases,
+            max_nmer_degree=args.max_order,
+        )
+    elif args.mode == 'build':
         nmer_sampling_conf = parse_sampling_specs(args.sampling) if args.sampling else args.order
         build_nmers(
             input_filename          = args.input,
@@ -35,8 +46,10 @@ def main(args=None):
             keep_nmer_names         = args.keep_nmer_names,
             monomer_mode            = args.monomer_mode,
             bond_order_mode         = args.bond_order_mode,
+            monomer_aliases         = aliases,
             max_processes           = args.max_processes,
             suffix                  = args.suffix,
+            cap_after_build         = not args.skip_cap,
         )
     elif args.mode == 'cap':
         data_root = join(args.root, "data")
@@ -46,6 +59,7 @@ def main(args=None):
             fit_poly_root=join(args.root, "fitting" + args.suffix, "poly" + args.suffix),
             logger=get_logger('02_cap_nmers.log', level=logging.DEBUG),
             max_processes=args.max_processes,
+            selected_nmer_names=args.nmer_names,
         )
     elif args.mode == 'prepare_qchem':
         charges_dict = dict(DataDict.CHARGES_DICT)
@@ -61,6 +75,7 @@ def main(args=None):
             qchem_min_in_root       = args.qchem_min_in_root,
             charges_dict            = charges_dict,
             qchem_mode              = args.qchem_mode,
+            selected_nmer_names     = args.nmer_names,
         )
 
 def parse_command_line(args=None):
@@ -71,9 +86,9 @@ def parse_command_line(args=None):
     )
     parser.add_argument(
         "mode",
-        choices=['build', 'cap', 'prepare_qchem'],
+        choices=['discover', 'build', 'cap', 'prepare_qchem'],
         help=(
-            "'build' samples and initially caps n-mers; 'cap' caps existing "
+            "'discover' catalogs monomers/n-mer types; 'build' samples n-mers and optionally caps them; 'cap' caps existing "
             "sampled n-mers; 'prepare_qchem' prepares QChem input files."
         ),
     )
@@ -112,8 +127,14 @@ def parse_command_line(args=None):
     parser.add_argument(
         "--keep-nmer-names",
         nargs='+',
-        help="Optional exact multimer names to keep at the highest requested order.",
+        help="Optional exact n-mer type names to build at every requested order.",
         default=None,
+    )
+    parser.add_argument(
+        "--nmer-names",
+        nargs='+',
+        default=None,
+        help="Optional exact n-mer type names to process for file-based stages.",
     )
     parser.add_argument(
         "--monomer-mode",
@@ -126,6 +147,22 @@ def parse_command_line(args=None):
         choices=["auto", "topology", "geometry"],
         default="auto",
         help="Use topology bond orders when available, infer them from geometry, or force single-bond fallback.",
+    )
+    parser.add_argument(
+        "--monomer-aliases-json",
+        default=None,
+        help="JSON object mapping automatically generated monomer names to user names.",
+    )
+    parser.add_argument(
+        "--max-order",
+        type=int,
+        default=3,
+        help="Largest connected n-mer order to include in discovery metadata.",
+    )
+    parser.add_argument(
+        "--skip-cap",
+        action="store_true",
+        help="Build sampled XYZ/HDF5 n-mers without performing the initial capping stage.",
     )
     parser.add_argument(
         "-s",
@@ -161,6 +198,25 @@ def parse_command_line(args=None):
     return parser.parse_args(args=args)
 
 
+def load_monomer_aliases(filename: Optional[str]) -> Dict[str, str]:
+    if not filename:
+        return {}
+    with open(filename) as aliases_file:
+        aliases = json.load(aliases_file)
+    if not isinstance(aliases, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) and value
+        for key, value in aliases.items()
+    ):
+        raise ValueError("Monomer aliases must be a JSON object of non-empty string pairs.")
+    invalid = [value for value in aliases.values() if re.fullmatch(r"[A-Za-z0-9_+-]+", value) is None]
+    if invalid:
+        raise ValueError("Monomer aliases may contain only letters, numbers, '_', '+', and '-'.")
+    values = list(aliases.values())
+    if len(values) != len(set(values)):
+        raise ValueError("Two automatic monomer names cannot share the same alias.")
+    return aliases
+
+
 def parse_sampling_specs(specs: List[str]) -> Dict[int, Union[int, tuple]]:
     """Parse CLI sampling specifications of the form ``ORDER=N[:METHOD]``."""
     result = {}
@@ -185,8 +241,10 @@ def build_nmers(
     keep_nmer_names: Optional[List[str]] = None,
     monomer_mode: str = "legacy",
     bond_order_mode: str = "auto",
+    monomer_aliases: Optional[Dict[str, str]] = None,
     max_processes: int = 0,
     suffix: str = "",
+    cap_after_build: bool = True,
     **kwargs
 ):
     logger = get_logger('02_build_nmers.log', level=logging.DEBUG)
@@ -214,17 +272,19 @@ def build_nmers(
         keep_nmer_names         = keep_nmer_names,
         monomer_mode            = monomer_mode,
         bond_order_mode         = bond_order_mode,
+        monomer_aliases         = monomer_aliases,
         compute_descriptors     = automatic_sampling,
         max_processes           = max_processes,
     )
 
-    build_xyz_capped_nmers(
-        nmers_root              = NMERS_ROOT,
-        nmers_capped_root       = NMERS_CAPPED_ROOT,
-        fit_poly_root           = FIT_POLY_ROOT,
-        logger                  = logger,
-        max_processes           = max_processes,
-    )
+    if cap_after_build:
+        build_xyz_capped_nmers(
+            nmers_root              = NMERS_ROOT,
+            nmers_capped_root       = NMERS_CAPPED_ROOT,
+            fit_poly_root           = FIT_POLY_ROOT,
+            logger                  = logger,
+            max_processes           = max_processes,
+        )
 
     logger.info("- Complete!")
 
@@ -237,6 +297,7 @@ def prepare_qchem(
     qchem_min_in_root: Optional[str] = None,
     charges_dict: Optional[dict] = None,
     qchem_mode: str = "filtered",
+    selected_nmer_names: Optional[List[str]] = None,
 ):
     logger = get_logger('02_prepare_qchem.log', level=logging.DEBUG)
     
@@ -254,6 +315,7 @@ def prepare_qchem(
         skip_if_not_frame_filter = qchem_mode == "filtered",
         minimization_only        = qchem_mode == "minimization",
         create_minimization_inputs = qchem_mode == "filtered",
+        selected_nmer_names       = selected_nmer_names,
     )
     logger.info("- Complete!")
 
@@ -268,6 +330,7 @@ def build_xyz_nmers(
     keep_nmer_names: Optional[List[str]] = None,
     monomer_mode: str = "legacy",
     bond_order_mode: str = "auto",
+    monomer_aliases: Optional[Dict[str, str]] = None,
     compute_descriptors: bool = True,
     max_processes: int = 0
 ):
@@ -292,7 +355,12 @@ def build_xyz_nmers(
             logger=logger,
             compute_descriptors=False,
             bond_order_mode=bond_order_mode,
+            aliases=monomer_aliases,
         )
+        if keep_only_monomer_names is not None:
+            selected_names = set(keep_only_monomer_names)
+            monomers = [monomer for monomer in monomers if monomer.name in selected_names]
+            discovery_metadata["selected_monomer_names"] = sorted(selected_names)
     else:
         monomers = build_monomers(
             dataset=traj_dataset,
@@ -335,6 +403,7 @@ def build_auto_monomers(
         logger: Logger,
         compute_descriptors: bool = True,
         bond_order_mode: str = "auto",
+        aliases: Optional[Dict[str, str]] = None,
     ):
     groups, discovery_metadata = discover_monomer_groups(
         dataset,
@@ -351,7 +420,9 @@ def build_auto_monomers(
         )
     }
 
+    aliases = aliases or {}
     monomers = []
+    automatic_names = []
     for monomer_id, heavy_atom_indices in enumerate(groups):
         heavy_atom_names = [
             local_to_name.get(index, f"{atom_types[index]}-{index}")
@@ -361,9 +432,10 @@ def build_auto_monomers(
             monomer_name = heavy_atom_names[0]
         else:
             monomer_name = "AUTO-" + "__".join(sorted(heavy_atom_names))
+        automatic_names.append(monomer_name)
         monomer = Monomer(
             id=monomer_id,
-            name=monomer_name,
+            name=aliases.get(monomer_name, monomer_name),
             heavy_atoms_names=heavy_atom_names,
             heavy_atoms_idcs=heavy_atom_indices,
             orig_all_idcs=atom_orig_indices,
@@ -377,7 +449,21 @@ def build_auto_monomers(
             monomer.compute_descriptors(orig_all_pos=dataset["position"])
         monomers.append(monomer)
 
+    discovery_metadata["automatic_monomer_names"] = automatic_names
     discovery_metadata["monomer_names"] = [monomer.name for monomer in monomers]
+    discovery_metadata["monomer_aliases"] = {
+        name: aliases.get(name, name)
+        for name in sorted(set(automatic_names))
+        if name.startswith("AUTO-")
+    }
+    assigned_by_automatic_name = {
+        automatic_name: aliases.get(automatic_name, automatic_name)
+        for automatic_name in set(automatic_names)
+    }
+    if len(set(assigned_by_automatic_name.values())) != len(assigned_by_automatic_name):
+        raise ValueError(
+            "Monomer aliases collapse distinct discovered monomer types onto the same name."
+        )
     discovery_metadata["monomer_count"] = len(monomers)
     logger.info(
         "--- Automatic monomer discovery: %d cores, %d multiple bonds (%s) ---",
@@ -539,6 +625,61 @@ def build_topology(monomers: List[Monomer], data_root: str, max_nmer_degree: Opt
     
     with open(os.path.join(data_root, DataDict.TOPOLOGY_FILENAME), "w") as topology_f:
         json.dump(topology, topology_f, indent=4)
+
+
+def candidate_nmer_names(
+    monomers: List[Monomer], atom_types, max_nmer_degree: int, logger: Logger
+) -> Dict[str, List[str]]:
+    """Catalog connected n-mer type names without allocating trajectory descriptors."""
+    candidates = {}
+    for order in range(1, max_nmer_degree + 1):
+        names = set()
+        for monomer_tuple in combinations(monomers, order):
+            if order > 1 and not monomers_are_valid(monomer_tuple):
+                continue
+            names.add(Multimer(monomer_tuple, atom_types, logger=logger).name)
+        candidates[str(order)] = sorted(names)
+    return candidates
+
+
+def discover_monomers(
+    input_filename: str,
+    dataset_root: str,
+    monomer_mode: str = "auto",
+    bond_order_mode: str = "auto",
+    monomer_aliases: Optional[Dict[str, str]] = None,
+    max_nmer_degree: int = 3,
+):
+    if not input_filename:
+        raise ValueError("--input is required for discovery mode.")
+    if max_nmer_degree < 1:
+        raise ValueError("--max-order must be positive.")
+    logger = get_logger('02_discover_monomers.log', level=logging.DEBUG)
+    dataset = dict(np.load(input_filename, allow_pickle=True))
+    if monomer_mode == "auto":
+        monomers, metadata = build_auto_monomers(
+            dataset,
+            logger,
+            compute_descriptors=False,
+            bond_order_mode=bond_order_mode,
+            aliases=monomer_aliases,
+        )
+    else:
+        monomers = build_monomers(
+            dataset, DataDict.MONOMERS_DICT, logger, compute_descriptors=False
+        )
+        metadata = {"mode": "legacy", "monomer_names": [m.name for m in monomers]}
+    metadata["candidate_nmers"] = candidate_nmer_names(
+        monomers, dataset["atom_type"], max_nmer_degree, logger
+    )
+    metadata["max_nmer_degree"] = max_nmer_degree
+    data_root = os.path.join(dataset_root, "data")
+    os.makedirs(data_root, exist_ok=True)
+    output = os.path.join(data_root, "monomer_discovery.json")
+    with open(output, "w") as discovery_file:
+        json.dump(metadata, discovery_file, indent=2)
+    logger.info("Saved monomer and n-mer catalog to %s", output)
+    return metadata
 
 def save_multimer(
     nmers_root: str,
@@ -891,7 +1032,6 @@ def build_multimers(
         max_processes = 1
 
     requested_orders = sorted(int(order) for order in nmer_sampling_conf)
-    highest_requested_order = max(requested_orders, default=None)
     for n in requested_orders:
         folder_name = DataDict.folder_name(n)
         logger.info(f"--- Building Multimers of order {n}...")
@@ -907,7 +1047,7 @@ def build_multimers(
             compute_descriptors=compute_descriptors,
             max_processes=max_processes,
             keep_nmer_names=keep_nmer_names,
-            keep_nmer_order=highest_requested_order,
+            keep_nmer_order=None,
         )
 
 def _distance_by_severed_order(info_dict: dict, capping_distances: Optional[dict]):
@@ -1182,9 +1322,21 @@ def get_nmer_indices(k: int):
         if all(x[j] == x[j - 1] + 1 for j in range(1, len(x)))
     ])
 
-def build_xyz_capped_nmers(nmers_root: str, nmers_capped_root: str, fit_poly_root: str, logger: Logger, max_processes: int = 4):
+def build_xyz_capped_nmers(
+    nmers_root: str,
+    nmers_capped_root: str,
+    fit_poly_root: str,
+    logger: Logger,
+    max_processes: int = 4,
+    selected_nmer_names: Optional[List[str]] = None,
+):
     logger.info("- Capping nmers...")
     h5_filepaths = list(glob.iglob(os.path.join(nmers_root, "**/*.h5"), recursive=True))
+    if selected_nmer_names is not None:
+        selected = set(selected_nmer_names)
+        h5_filepaths = [path for path in h5_filepaths if basename(dirname(path)) in selected]
+    if not h5_filepaths:
+        raise FileNotFoundError(f"No selected n-mer HDF5 files found under {nmers_root}")
 
     if max_processes > 0:
         with multiprocessing.Pool(processes=max_processes) as pool:
