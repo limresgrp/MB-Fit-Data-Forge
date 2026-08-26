@@ -946,13 +946,13 @@ def save_multimer(
     multimer_atom_types: np.ndarray,
     logger: Logger,
     coords_are_sampled: bool = False,
+    merge_existing: bool = False,
 ):
 
     # - Create folder - #
     nmer_folder = os.path.join(nmers_root, folder_name, multimer.name)
     if not os.path.isdir(nmer_folder): os.makedirs(nmer_folder, exist_ok=True)
     h5_filename = os.path.join(nmer_folder, multimer.h5_filename)
-    if os.path.isfile(h5_filename): logger.warning(f"File {h5_filename} exists alreeady. Overwriting...")
     if multimer_sampled_indices is None: multimer_sampled_indices = np.arange(len(multimer_coords))
         
     # Index of all monomer atoms, relative to multimer atoms only
@@ -983,8 +983,55 @@ def save_multimer(
     atom_types = np.asarray(multimer_atom_types, dtype=string_dtype)
     fullnames  = np.asarray([f"{str(frame_id)}_{multimer.fullname}" for frame_id in multimer_sampled_indices], dtype=string_dtype)
 
-    # Save to h5 file
-    write_h5_file(h5_filename, coords, atom_types, fullnames, info_dict)
+    if os.path.isfile(h5_filename) and merge_existing:
+        existing_coords, existing_atom_types, existing_fullnames, _, _ = read_h5_file(
+            h5_filename, logger=logger
+        )
+        if not np.array_equal(existing_atom_types.astype("U"), atom_types.astype("U")):
+            raise ValueError(
+                f"Cannot consolidate samples in {h5_filename}: atom types differ."
+            )
+        if existing_coords.shape[1:] != coords.shape[1:]:
+            raise ValueError(
+                f"Cannot consolidate samples in {h5_filename}: coordinate shapes differ."
+            )
+
+        existing_names = existing_fullnames.astype("U")
+        new_names = fullnames.astype("U")
+        seen_names = set(existing_names.tolist())
+        unseen_indices = []
+        for frame_index, frame_name in enumerate(new_names):
+            if frame_name in seen_names:
+                continue
+            seen_names.add(frame_name)
+            unseen_indices.append(frame_index)
+
+        if unseen_indices:
+            coords = np.concatenate((existing_coords, coords[unseen_indices]), axis=0)
+            fullnames = np.concatenate((existing_names, new_names[unseen_indices]))
+            logger.info(
+                "--- Consolidated %d existing and %d new unique frames in %s",
+                len(existing_names), len(unseen_indices), h5_filename,
+            )
+        else:
+            coords = existing_coords
+            fullnames = existing_names
+            logger.info(
+                "--- All %d frames already exist in %s; keeping the existing samples",
+                len(new_names), h5_filename,
+            )
+    elif os.path.isfile(h5_filename):
+        logger.info("--- Replacing the previous sample set in %s", h5_filename)
+
+    # Write atomically so an interrupted consolidation cannot corrupt an
+    # existing set of samples.
+    temporary_filename = f"{h5_filename}.tmp.{os.getpid()}"
+    try:
+        write_h5_file(temporary_filename, coords, atom_types, fullnames, info_dict)
+        os.replace(temporary_filename, h5_filename)
+    finally:
+        if os.path.exists(temporary_filename):
+            os.remove(temporary_filename)
 
 def get_bonded_idcs(
     idcs: np.ndarray,
@@ -1020,11 +1067,18 @@ def build_multimer_recursively(
     max_processes: int = 0,
     keep_nmer_names: Optional[List[str]] = None,
     keep_nmer_order: Optional[int] = None,
+    written_h5_files: Optional[set] = None,
 ):
-    if n not in nmer_sampling_conf:
+    if n < 1:
         return
-
-    n_samples, method = parse_nmer_sampling_conf(nmer_sampling_conf[n])
+    if n not in nmer_sampling_conf:
+        if recursive_multimer_sampled_indices is None:
+            return
+        # A sampled parent always requires its complete lower-order closure.
+        # Lower components inherit the parent's exact trajectory frames.
+        n_samples, method = None, 'ALL'
+    else:
+        n_samples, method = parse_nmer_sampling_conf(nmer_sampling_conf[n])
     
     multimers: List[Multimer] = []
     multimers_occurrence = {}
@@ -1047,6 +1101,9 @@ def build_multimer_recursively(
         counts = multimers_occurrence.get(multimer.name, 0) + 1
         multimers_occurrence[multimer.name] = counts
         multimers_first_occurrence[multimer.name] = True
+
+    if written_h5_files is None:
+        written_h5_files = set()
 
     prepared_tasks = []
     for multimer in multimers:
@@ -1073,11 +1130,16 @@ def build_multimer_recursively(
         multimer.bond_values = None
         multimer.angle_values = None
         multimer.dihedral_values = None
-        prepared_tasks.append((multimer, sampled_indices))
+        target_h5 = os.path.join(
+            nmers_root, folder_name, multimer.name, multimer.h5_filename
+        )
+        merge_existing = target_h5 in written_h5_files
+        written_h5_files.add(target_h5)
+        prepared_tasks.append((multimer, sampled_indices, merge_existing))
 
     if max_processes <= 1:
         result = []
-        for multimer, sampled_indices in prepared_tasks:
+        for multimer, sampled_indices, merge_existing in prepared_tasks:
             # Slice one serial task at a time instead of retaining sampled
             # coordinates for every n-mer until all files have been written.
             task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
@@ -1094,6 +1156,7 @@ def build_multimer_recursively(
                 orig_all_atom_types[multimer.orig_all_atoms_idcs],
                 recursive_multimer_sampled_indices,
                 sampled_indices,
+                merge_existing,
             )
             result.append(res)
     else:
@@ -1101,10 +1164,10 @@ def build_multimer_recursively(
         # proportional to the requested sample count rather than the full
         # trajectory length.
         worker_tasks = []
-        for multimer, sampled_indices in prepared_tasks:
+        for multimer, sampled_indices, merge_existing in prepared_tasks:
             task_coords = orig_pos if sampled_indices is None else orig_pos[sampled_indices]
             task_coords = task_coords[:, multimer.orig_all_atoms_idcs]
-            worker_tasks.append((multimer, sampled_indices, task_coords))
+            worker_tasks.append((multimer, sampled_indices, task_coords, merge_existing))
         with multiprocessing.Pool(processes=max_processes) as pool:
             result = pool.starmap(
                 process_multimer,
@@ -1121,8 +1184,9 @@ def build_multimer_recursively(
                         orig_all_atom_types[multimer.orig_all_atoms_idcs],
                         recursive_multimer_sampled_indices,
                         sampled_indices,
+                        merge_existing,
                     )
-                    for multimer, sampled_indices, task_coords in worker_tasks
+                    for multimer, sampled_indices, task_coords, merge_existing in worker_tasks
                 ]
             )
     
@@ -1132,46 +1196,26 @@ def build_multimer_recursively(
         multimers.append(multimer)
         recursive_multimer_sampled_indices_list.append(recursive_multimer_sampled_indices)
     
-    if max_processes <= 1:
-        for multimer, recursive_multimer_sampled_indices in zip(multimers, recursive_multimer_sampled_indices_list):
-            build_multimer_recursively(
-                nmers_root,
-                nmer_sampling_conf,
-                multimer._monomers,
-                n-1,
-                os.path.join(folder_name, DataDict.folder_name(n - 1)),
-                orig_pos,
-                orig_all_atom_types,
-                logger,
-                recursive_multimer_sampled_indices,
-                compute_descriptors,
-                0,
-                keep_nmer_names,
-                keep_nmer_order,
-            )
-    else:
-        with multiprocessing.Pool(processes=max_processes) as pool:
-            pool.starmap(
-                build_multimer_recursively,
-                [
-                    (
-                        nmers_root,
-                        nmer_sampling_conf,
-                        multimer._monomers,
-                        n-1,
-                        os.path.join(folder_name, DataDict.folder_name(n - 1)),
-                        orig_pos,
-                        orig_all_atom_types,
-                        logger,
-                        recursive_multimer_sampled_indices,
-                        compute_descriptors,
-                        0,
-                        keep_nmer_names,
-                        keep_nmer_order,
-                    )
-                    for multimer, recursive_multimer_sampled_indices in zip(multimers, recursive_multimer_sampled_indices_list)
-                ]
-            )
+    # Different parents can share lower-order occurrences and therefore target
+    # the same HDF5 file. Recurse serially so save_multimer can consolidate
+    # unique frame IDs without cross-process read/modify/write races.
+    for multimer, recursive_multimer_sampled_indices in zip(multimers, recursive_multimer_sampled_indices_list):
+        build_multimer_recursively(
+            nmers_root,
+            nmer_sampling_conf,
+            multimer._monomers,
+            n-1,
+            os.path.join(folder_name, DataDict.folder_name(n - 1)),
+            orig_pos,
+            orig_all_atom_types,
+            logger,
+            recursive_multimer_sampled_indices,
+            compute_descriptors,
+            0,
+            keep_nmer_names,
+            keep_nmer_order,
+            written_h5_files,
+        )
 
 def parse_nmer_sampling_conf(x):
     if x is None:
@@ -1232,6 +1276,7 @@ def process_multimer(
     multimer_atom_types,
     recursive_multimer_sampled_indices,
     sampled_indices_override=None,
+    merge_existing: bool = False,
 ):
     configure_logging()
     logger = logging.getLogger()
@@ -1259,6 +1304,7 @@ def process_multimer(
         multimer_atom_types,
         logger,
         coords_are_sampled=True,
+        merge_existing=merge_existing,
     )
     return multimer, multimer_sampled_indices
 
@@ -1288,6 +1334,7 @@ def build_multimers(
         max_processes = 1
 
     requested_orders = sorted(int(order) for order in nmer_sampling_conf)
+    written_h5_files = set()
     for n in requested_orders:
         folder_name = DataDict.folder_name(n)
         logger.info(f"--- Building Multimers of order {n}...")
@@ -1303,7 +1350,8 @@ def build_multimers(
             compute_descriptors=compute_descriptors,
             max_processes=max_processes,
             keep_nmer_names=keep_nmer_names,
-            keep_nmer_order=None,
+            keep_nmer_order=n,
+            written_h5_files=written_h5_files,
         )
 
 def _distance_by_severed_order(info_dict: dict, capping_distances: Optional[dict]):
