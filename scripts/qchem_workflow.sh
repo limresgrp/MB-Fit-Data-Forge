@@ -234,7 +234,7 @@ stage_parse_trajectory() {
 }
 
 stage_discover_monomers() {
-    local monomer_mode bond_order_mode max_order discovery aliases_file merges_file charges_file raw_name current_name requested_name merge_name inferred_charge current_charge answer
+    local monomer_mode bond_order_mode max_order discovery aliases_file merges_file candidate_merges_file charges_file raw_name current_name requested_name merge_name inferred_charge current_charge answer
     local -a raw_auto_names=() discovery_args=() MERGE_ENTRIES=() CHARGE_ENTRIES=()
     require_file "$TRAJ_DATASET" || return 1
     monomer_mode=$(ask_default "Monomer discovery mode (auto or legacy)" auto)
@@ -294,15 +294,31 @@ with open(sys.argv[1], "w") as stream:
     stream.write("\n")
 PY
         discovery_args=(--monomer-aliases-json "$aliases_file" --monomer-merges-json "$merges_file")
-        run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}"
+        if ! run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}"; then
+            echo "The saved connected-monomer merge definitions are invalid for this topology." >&2
+            if ask_yes_no "Clear the invalid merge definitions and continue?" y; then
+                "$PYTHON" - "$merges_file" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as stream:
+    json.dump({"version": 1, "merges": []}, stream, indent=2)
+    stream.write("\n")
+PY
+                run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}" || return 1
+            else
+                return 1
+            fi
+        fi
 
         while ask_yes_no "Merge connected inferred monomer types into a larger monomer?" n; do
             mapfile -t MERGE_ENTRIES < <("$PYTHON" - "$discovery" <<'PY'
 import json, sys
 with open(sys.argv[1]) as stream: data = json.load(stream)
 charges = data.get("inferred_charges", {})
+counts = {}
+for name in data.get("monomer_names", []):
+    counts[name] = counts.get(name, 0) + 1
 for name in data.get("candidate_nmers", {}).get("1", []):
-    print(f"[suggested charge {charges.get(name, 'review')}] {name}")
+    print(f"[suggested charge {charges.get(name, 'review')}; {counts.get(name, 0)} occurrence(s)] {name}")
 PY
             )
             choose_numbered_entries "Choose at least two connected monomer types to merge:" "${MERGE_ENTRIES[@]}" || return 1
@@ -316,20 +332,29 @@ PY
                 [[ "$merge_name" =~ ^[A-Za-z0-9_+-]+$ ]] && break
                 echo "Use only letters, numbers, '_', '+', and '-' in monomer names." >&2
             done
-            MERGE_MEMBERS=$(printf '%s\n' "${SELECTED_NMER_NAMES[@]}") MERGE_NAME="$merge_name" "$PYTHON" - "$merges_file" <<'PY'
+            candidate_merges_file="${merges_file}.candidate.$$"
+            MERGE_MEMBERS=$(printf '%s\n' "${SELECTED_NMER_NAMES[@]}") MERGE_NAME="$merge_name" "$PYTHON" - "$merges_file" "$candidate_merges_file" <<'PY'
 import json, os, sys
-path = sys.argv[1]
-data = json.load(open(path))
+source_path, candidate_path = sys.argv[1:]
+data = json.load(open(source_path))
 members = list(dict.fromkeys(os.environ["MERGE_MEMBERS"].splitlines()))
 name = os.environ["MERGE_NAME"]
 if any(entry["name"] == name for entry in data.get("merges", [])):
     raise SystemExit(f"A merge named {name!r} already exists.")
 data.setdefault("merges", []).append({"name": name, "members": members})
-with open(path, "w") as stream:
+with open(candidate_path, "w") as stream:
     json.dump(data, stream, indent=2)
     stream.write("\n")
 PY
-            run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}"
+            if run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" --monomer-aliases-json "$aliases_file" --monomer-merges-json "$candidate_merges_file"; then
+                mv "$candidate_merges_file" "$merges_file"
+                echo "Saved validated merge '$merge_name'. All connected occurrences of the selected types in each matching component were included."
+            else
+                rm -f "$candidate_merges_file"
+                echo "Could not create '$merge_name': the selected monomer types do not form one connected component in this topology." >&2
+                printf 'Selected types: %s\n' "${SELECTED_NMER_NAMES[*]}" >&2
+                echo "Nothing was saved. Select monomer types that are joined directly by bonds." >&2
+            fi
         done
 
         mapfile -t CHARGE_ENTRIES < <("$PYTHON" - "$discovery" "$charges_file" <<'PY'

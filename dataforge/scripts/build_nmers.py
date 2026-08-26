@@ -522,8 +522,16 @@ def _merge_discovered_groups(groups, names, bonds, merge_definitions):
 def _infer_formal_charges(monomers, dataset, bond_orders):
     """Suggest integer formal charges from full-topology bond-order sums."""
     atom_types = np.asarray(dataset["atom_type"]).astype(str)
+    normalised_types = np.asarray([
+        value[0].upper() + value[1:].lower() for value in atom_types
+    ])
+    bonds = np.asarray(dataset["bond_indices"], dtype=int)
+    neighbours = [set() for _ in atom_types]
+    for left, right in bonds:
+        neighbours[int(left)].add(int(right))
+        neighbours[int(right)].add(int(left))
     bond_sums = np.zeros(len(atom_types), dtype=float)
-    for (left, right), order in zip(np.asarray(dataset["bond_indices"], dtype=int), bond_orders):
+    for (left, right), order in zip(bonds, bond_orders):
         bond_sums[left] += float(order)
         bond_sums[right] += float(order)
     rules = {
@@ -533,35 +541,85 @@ def _infer_formal_charges(monomers, dataset, bond_orders):
         "F": {0: -1, 1: 0}, "Cl": {0: -1, 1: 0},
         "Br": {0: -1, 1: 0}, "I": {0: -1, 1: 0},
     }
+    phosphate_centers = {}
+    for atom_index, element in enumerate(normalised_types):
+        if element != "P":
+            continue
+        oxygen_indices = sorted(
+            neighbour for neighbour in neighbours[atom_index]
+            if normalised_types[neighbour] == "O"
+        )
+        if len(oxygen_indices) != 4:
+            continue
+        neutralised_oxygen_count = sum(
+            any(
+                other != atom_index
+                for other in neighbours[oxygen_index]
+            )
+            for oxygen_index in oxygen_indices
+        )
+        phosphate_centers[atom_index] = {
+            "oxygen_indices": oxygen_indices,
+            "neutralised_oxygen_count": int(neutralised_oxygen_count),
+            "formal_charge": int(neutralised_oxygen_count - 3),
+        }
     occurrences = {}
     evidence = []
     for monomer in monomers:
         charge = 0
         uncertain = []
         atom_evidence = []
-        for atom_index in np.asarray(monomer.heavy_atoms_idcs, dtype=int).reshape(-1):
-            element_value = atom_types[atom_index]
-            element = element_value.decode() if isinstance(element_value, bytes) else str(element_value)
-            normalised = element[0].upper() + element[1:].lower()
+        atom_charges = {}
+        heavy_atom_indices = np.asarray(monomer.heavy_atoms_idcs, dtype=int).reshape(-1)
+        for atom_index in heavy_atom_indices:
+            normalised = normalised_types[atom_index]
             rounded_sum = int(round(float(bond_sums[atom_index])))
             atom_charge = rules.get(normalised, {}).get(rounded_sum)
             if atom_charge is None:
                 atom_charge = 0
                 uncertain.append(int(atom_index))
+            atom_charges[int(atom_index)] = int(atom_charge)
             charge += atom_charge
             atom_evidence.append({
                 "atom_index": int(atom_index),
-                "element": normalised,
+                "element": str(normalised),
                 "bond_order_sum": float(bond_sums[atom_index]),
                 "formal_charge": int(atom_charge),
                 "rule_matched": int(atom_index) not in uncertain,
             })
+        special_rules = []
+        covered_atoms = set()
+        centers_in_monomer = [
+            int(atom_index) for atom_index in heavy_atom_indices
+            if int(atom_index) in phosphate_centers
+        ]
+        if centers_in_monomer:
+            charge = 0
+            for center_index in centers_in_monomer:
+                rule = phosphate_centers[center_index]
+                covered_atoms.add(center_index)
+                covered_atoms.update(rule["oxygen_indices"])
+                charge += rule["formal_charge"]
+                special_rules.append({
+                    "rule": "phosphate charge from protonated/substituted oxygen count",
+                    "center_atom_index": center_index,
+                    **rule,
+                })
+            charge += sum(
+                atom_charge for atom_index, atom_charge in atom_charges.items()
+                if atom_index not in covered_atoms
+            )
+            uncertain = [atom_index for atom_index in uncertain if atom_index not in covered_atoms]
+            for atom_item in atom_evidence:
+                if atom_item["atom_index"] in covered_atoms:
+                    atom_item["covered_by_special_rule"] = True
         occurrences.setdefault(monomer.name, []).append(int(charge))
         evidence.append({
             "monomer_id": int(monomer.id), "name": monomer.name,
             "suggested_charge": int(charge),
             "confidence": "high" if not uncertain else "review",
             "atoms": atom_evidence,
+            "special_rules": special_rules,
         })
     inferred = {
         name: charges[0]
@@ -572,7 +630,7 @@ def _infer_formal_charges(monomers, dataset, bond_orders):
         name: sorted(set(charges)) for name, charges in occurrences.items() if len(set(charges)) > 1
     }
     return inferred, {
-        "method": "formal charge from full-topology integer bond-order sums",
+        "method": "formal charge from full-topology integer bond-order sums, with phosphate protonation/substitution rules",
         "review_required": bool(inconsistent) or any(item["confidence"] != "high" for item in evidence),
         "inconsistent_type_charges": inconsistent,
         "occurrences": evidence,
@@ -1559,4 +1617,7 @@ def build_xyz_capped_nmers(
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError as error:
+        raise SystemExit(f"Error: {error}") from None
