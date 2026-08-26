@@ -26,6 +26,7 @@ from dataforge.src.monomer_discovery import COVALENT_RADII, discover_monomer_gro
 def main(args=None):
     args = parse_command_line(args)
     aliases = load_monomer_aliases(args.monomer_aliases_json)
+    merges = load_monomer_merges(args.monomer_merges_json)
 
     if args.mode == 'discover':
         discover_monomers(
@@ -34,6 +35,7 @@ def main(args=None):
             monomer_mode=args.monomer_mode,
             bond_order_mode=args.bond_order_mode,
             monomer_aliases=aliases,
+            monomer_merges=merges,
             max_nmer_degree=args.max_order,
         )
     elif args.mode == 'build':
@@ -47,6 +49,7 @@ def main(args=None):
             monomer_mode            = args.monomer_mode,
             bond_order_mode         = args.bond_order_mode,
             monomer_aliases         = aliases,
+            monomer_merges          = merges,
             max_processes           = args.max_processes,
             suffix                  = args.suffix,
             cap_after_build         = not args.skip_cap,
@@ -154,6 +157,11 @@ def parse_command_line(args=None):
         help="JSON object mapping automatically generated monomer names to user names.",
     )
     parser.add_argument(
+        "--monomer-merges-json",
+        default=None,
+        help="JSON metadata defining connected discovered monomer types to merge.",
+    )
+    parser.add_argument(
         "--max-order",
         type=int,
         default=3,
@@ -217,6 +225,36 @@ def load_monomer_aliases(filename: Optional[str]) -> Dict[str, str]:
     return aliases
 
 
+def load_monomer_merges(filename: Optional[str]) -> List[dict]:
+    if not filename:
+        return []
+    with open(filename) as merge_file:
+        data = json.load(merge_file)
+    merges = data.get("merges", data) if isinstance(data, dict) else data
+    if not isinstance(merges, list):
+        raise ValueError("Monomer merges must be a list or an object containing a 'merges' list.")
+    validated = []
+    known_names = set()
+    for entry in merges:
+        if not isinstance(entry, dict):
+            raise ValueError("Every monomer merge must be an object.")
+        name = entry.get("name")
+        members = entry.get("members")
+        if re.fullmatch(r"[A-Za-z0-9_+-]+", str(name or "")) is None:
+            raise ValueError(f"Invalid merged monomer name: {name!r}.")
+        if (
+            not isinstance(members, list)
+            or not all(isinstance(member, str) and member for member in members)
+            or len(set(members)) < 2
+        ):
+            raise ValueError(f"Merge {name!r} must contain at least two distinct member names.")
+        if name in known_names:
+            raise ValueError(f"Duplicate merged monomer name: {name!r}.")
+        known_names.add(name)
+        validated.append({"name": name, "members": list(dict.fromkeys(members))})
+    return validated
+
+
 def parse_sampling_specs(specs: List[str]) -> Dict[int, Union[int, tuple]]:
     """Parse CLI sampling specifications of the form ``ORDER=N[:METHOD]``."""
     result = {}
@@ -242,6 +280,7 @@ def build_nmers(
     monomer_mode: str = "legacy",
     bond_order_mode: str = "auto",
     monomer_aliases: Optional[Dict[str, str]] = None,
+    monomer_merges: Optional[List[dict]] = None,
     max_processes: int = 0,
     suffix: str = "",
     cap_after_build: bool = True,
@@ -273,6 +312,7 @@ def build_nmers(
         monomer_mode            = monomer_mode,
         bond_order_mode         = bond_order_mode,
         monomer_aliases         = monomer_aliases,
+        monomer_merges          = monomer_merges,
         compute_descriptors     = automatic_sampling,
         max_processes           = max_processes,
     )
@@ -331,6 +371,7 @@ def build_xyz_nmers(
     monomer_mode: str = "legacy",
     bond_order_mode: str = "auto",
     monomer_aliases: Optional[Dict[str, str]] = None,
+    monomer_merges: Optional[List[dict]] = None,
     compute_descriptors: bool = True,
     max_processes: int = 0
 ):
@@ -356,6 +397,7 @@ def build_xyz_nmers(
             compute_descriptors=False,
             bond_order_mode=bond_order_mode,
             aliases=monomer_aliases,
+            merge_definitions=monomer_merges,
         )
         if keep_only_monomer_names is not None:
             selected_names = set(keep_only_monomer_names)
@@ -398,12 +440,152 @@ def build_xyz_nmers(
     )
     logger.info("- Completed building nmers!")
 
+def _automatic_group_name(heavy_atom_indices, atom_types, local_to_name):
+    heavy_atom_names = [
+        local_to_name.get(index, f"{atom_types[index]}-{index}")
+        for index in heavy_atom_indices
+    ]
+    if len(heavy_atom_indices) == 1:
+        return heavy_atom_names[0], heavy_atom_names
+    return "AUTO-" + "__".join(sorted(heavy_atom_names)), heavy_atom_names
+
+
+def _merge_discovered_groups(groups, names, bonds, merge_definitions):
+    """Apply named merges only to connected components containing every requested type."""
+    records = [
+        {"indices": list(group), "name": name, "merged_from": [name]}
+        for group, name in zip(groups, names)
+    ]
+    merge_metadata = []
+    for definition in merge_definitions or []:
+        member_names = set(definition["members"])
+        eligible = {i for i, record in enumerate(records) if record["name"] in member_names}
+        atom_to_record = {
+            atom: record_index
+            for record_index, record in enumerate(records)
+            for atom in record["indices"]
+        }
+        adjacency = {record_index: set() for record_index in eligible}
+        for left, right in np.asarray(bonds, dtype=int):
+            left_record = atom_to_record.get(int(left))
+            right_record = atom_to_record.get(int(right))
+            if left_record in eligible and right_record in eligible and left_record != right_record:
+                adjacency[left_record].add(right_record)
+                adjacency[right_record].add(left_record)
+
+        components = []
+        unseen = set(eligible)
+        while unseen:
+            start = unseen.pop()
+            component = {start}
+            stack = [start]
+            while stack:
+                current = stack.pop()
+                neighbours = adjacency[current] & unseen
+                unseen -= neighbours
+                component |= neighbours
+                stack.extend(neighbours)
+            if member_names <= {records[i]["name"] for i in component}:
+                components.append(component)
+
+        if not components:
+            raise ValueError(
+                f"Merge {definition['name']!r} did not match a connected component "
+                f"containing {sorted(member_names)}."
+            )
+        consumed = set().union(*components)
+        if any(
+            record["name"] == definition["name"]
+            for i, record in enumerate(records)
+            if i not in consumed
+        ):
+            raise ValueError(
+                f"Merged monomer name {definition['name']!r} conflicts with an unmerged type."
+            )
+        new_records = [record for i, record in enumerate(records) if i not in consumed]
+        for component in components:
+            component_records = [records[i] for i in sorted(component)]
+            new_records.append({
+                "indices": sorted({atom for record in component_records for atom in record["indices"]}),
+                "name": definition["name"],
+                "merged_from": sorted({name for record in component_records for name in record["merged_from"]}),
+            })
+        records = sorted(new_records, key=lambda record: min(record["indices"]))
+        merge_metadata.append({
+            **definition,
+            "matched_components": len(components),
+            "matched_group_count": len(consumed),
+        })
+    return records, merge_metadata
+
+
+def _infer_formal_charges(monomers, dataset, bond_orders):
+    """Suggest integer formal charges from full-topology bond-order sums."""
+    atom_types = np.asarray(dataset["atom_type"]).astype(str)
+    bond_sums = np.zeros(len(atom_types), dtype=float)
+    for (left, right), order in zip(np.asarray(dataset["bond_indices"], dtype=int), bond_orders):
+        bond_sums[left] += float(order)
+        bond_sums[right] += float(order)
+    rules = {
+        "H": {1: 0}, "B": {3: 0, 4: -1}, "C": {4: 0},
+        "N": {2: -1, 3: 0, 4: 1}, "O": {1: -1, 2: 0, 3: 1},
+        "P": {3: 0, 4: 1, 5: 0}, "S": {1: -1, 2: 0, 4: 0, 6: 0},
+        "F": {0: -1, 1: 0}, "Cl": {0: -1, 1: 0},
+        "Br": {0: -1, 1: 0}, "I": {0: -1, 1: 0},
+    }
+    occurrences = {}
+    evidence = []
+    for monomer in monomers:
+        charge = 0
+        uncertain = []
+        atom_evidence = []
+        for atom_index in np.asarray(monomer.heavy_atoms_idcs, dtype=int).reshape(-1):
+            element_value = atom_types[atom_index]
+            element = element_value.decode() if isinstance(element_value, bytes) else str(element_value)
+            normalised = element[0].upper() + element[1:].lower()
+            rounded_sum = int(round(float(bond_sums[atom_index])))
+            atom_charge = rules.get(normalised, {}).get(rounded_sum)
+            if atom_charge is None:
+                atom_charge = 0
+                uncertain.append(int(atom_index))
+            charge += atom_charge
+            atom_evidence.append({
+                "atom_index": int(atom_index),
+                "element": normalised,
+                "bond_order_sum": float(bond_sums[atom_index]),
+                "formal_charge": int(atom_charge),
+                "rule_matched": int(atom_index) not in uncertain,
+            })
+        occurrences.setdefault(monomer.name, []).append(int(charge))
+        evidence.append({
+            "monomer_id": int(monomer.id), "name": monomer.name,
+            "suggested_charge": int(charge),
+            "confidence": "high" if not uncertain else "review",
+            "atoms": atom_evidence,
+        })
+    inferred = {
+        name: charges[0]
+        for name, charges in occurrences.items()
+        if len(set(charges)) == 1
+    }
+    inconsistent = {
+        name: sorted(set(charges)) for name, charges in occurrences.items() if len(set(charges)) > 1
+    }
+    return inferred, {
+        "method": "formal charge from full-topology integer bond-order sums",
+        "review_required": bool(inconsistent) or any(item["confidence"] != "high" for item in evidence),
+        "inconsistent_type_charges": inconsistent,
+        "occurrences": evidence,
+    }
+
+
 def build_auto_monomers(
         dataset: dict,
         logger: Logger,
         compute_descriptors: bool = True,
         bond_order_mode: str = "auto",
         aliases: Optional[Dict[str, str]] = None,
+        merge_definitions: Optional[List[dict]] = None,
     ):
     groups, discovery_metadata = discover_monomer_groups(
         dataset,
@@ -421,21 +603,29 @@ def build_auto_monomers(
     }
 
     aliases = aliases or {}
+    base_automatic_names = []
+    base_heavy_names = []
+    for heavy_atom_indices in groups:
+        automatic_name, heavy_names = _automatic_group_name(
+            heavy_atom_indices, atom_types, local_to_name
+        )
+        base_automatic_names.append(automatic_name)
+        base_heavy_names.append(heavy_names)
+    assigned_base_names = [aliases.get(name, name) for name in base_automatic_names]
+    records, merge_metadata = _merge_discovered_groups(
+        groups, assigned_base_names, dataset["bond_indices"], merge_definitions
+    )
+
     monomers = []
-    automatic_names = []
-    for monomer_id, heavy_atom_indices in enumerate(groups):
+    for monomer_id, record in enumerate(records):
+        heavy_atom_indices = record["indices"]
         heavy_atom_names = [
             local_to_name.get(index, f"{atom_types[index]}-{index}")
             for index in heavy_atom_indices
         ]
-        if len(heavy_atom_indices) == 1:
-            monomer_name = heavy_atom_names[0]
-        else:
-            monomer_name = "AUTO-" + "__".join(sorted(heavy_atom_names))
-        automatic_names.append(monomer_name)
         monomer = Monomer(
             id=monomer_id,
-            name=aliases.get(monomer_name, monomer_name),
+            name=record["name"],
             heavy_atoms_names=heavy_atom_names,
             heavy_atoms_idcs=heavy_atom_indices,
             orig_all_idcs=atom_orig_indices,
@@ -449,22 +639,28 @@ def build_auto_monomers(
             monomer.compute_descriptors(orig_all_pos=dataset["position"])
         monomers.append(monomer)
 
-    discovery_metadata["automatic_monomer_names"] = automatic_names
+    discovery_metadata["automatic_monomer_names"] = base_automatic_names
     discovery_metadata["monomer_names"] = [monomer.name for monomer in monomers]
     discovery_metadata["monomer_aliases"] = {
         name: aliases.get(name, name)
-        for name in sorted(set(automatic_names))
+        for name in sorted(set(base_automatic_names))
         if name.startswith("AUTO-")
     }
     assigned_by_automatic_name = {
         automatic_name: aliases.get(automatic_name, automatic_name)
-        for automatic_name in set(automatic_names)
+        for automatic_name in set(base_automatic_names)
     }
     if len(set(assigned_by_automatic_name.values())) != len(assigned_by_automatic_name):
         raise ValueError(
             "Monomer aliases collapse distinct discovered monomer types onto the same name."
         )
     discovery_metadata["monomer_count"] = len(monomers)
+    discovery_metadata["monomer_merges"] = merge_metadata
+    inferred_charges, charge_evidence = _infer_formal_charges(
+        monomers, dataset, discovery_metadata["bond_orders"]
+    )
+    discovery_metadata["inferred_charges"] = inferred_charges
+    discovery_metadata["charge_inference"] = charge_evidence
     logger.info(
         "--- Automatic monomer discovery: %d cores, %d multiple bonds (%s) ---",
         len(monomers),
@@ -648,6 +844,7 @@ def discover_monomers(
     monomer_mode: str = "auto",
     bond_order_mode: str = "auto",
     monomer_aliases: Optional[Dict[str, str]] = None,
+    monomer_merges: Optional[List[dict]] = None,
     max_nmer_degree: int = 3,
 ):
     if not input_filename:
@@ -663,6 +860,7 @@ def discover_monomers(
             compute_descriptors=False,
             bond_order_mode=bond_order_mode,
             aliases=monomer_aliases,
+            merge_definitions=monomer_merges,
         )
     else:
         monomers = build_monomers(

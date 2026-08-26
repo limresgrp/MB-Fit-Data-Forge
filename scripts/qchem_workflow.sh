@@ -234,13 +234,16 @@ stage_parse_trajectory() {
 }
 
 stage_discover_monomers() {
-    local monomer_mode bond_order_mode max_order discovery aliases_file raw_name current_name requested_name
-    local -a raw_auto_names=() discovery_args=()
+    local monomer_mode bond_order_mode max_order discovery aliases_file merges_file charges_file raw_name current_name requested_name merge_name inferred_charge current_charge answer
+    local -a raw_auto_names=() discovery_args=() MERGE_ENTRIES=() CHARGE_ENTRIES=()
     require_file "$TRAJ_DATASET" || return 1
     monomer_mode=$(ask_default "Monomer discovery mode (auto or legacy)" auto)
     bond_order_mode=$(ask_default "Bond-order mode (auto, topology, or geometry)" auto)
     max_order=$(ask_default "Largest n-mer order to catalog" 3)
-    discovery="$DATASET_ROOT/data/monomer_discovery.json"; aliases_file="$DATASET_ROOT/metadata/monomer_aliases.json"
+    discovery="$DATASET_ROOT/data/monomer_discovery.json"
+    aliases_file="$DATASET_ROOT/metadata/monomer_aliases.json"
+    merges_file="$DATASET_ROOT/metadata/monomer_merges.json"
+    charges_file="$DATASET_ROOT/metadata/monomer_charges.json"
     mkdir -p "$DATASET_ROOT/metadata"
     run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order"
     if [[ "$monomer_mode" == auto ]]; then
@@ -276,21 +279,116 @@ if len(set(aliases.values())) != len(aliases): raise SystemExit("Two AUTO monome
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as stream: json.dump(aliases, stream, indent=2, sort_keys=True); stream.write("\n")
 PY
-        discovery_args=(--monomer-aliases-json "$aliases_file")
+        if [[ -f "$merges_file" ]] && ! ask_yes_no "Keep existing connected-monomer merge definitions?" y; then
+            "$PYTHON" - "$merges_file" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as stream:
+    json.dump({"version": 1, "merges": []}, stream, indent=2)
+    stream.write("\n")
+PY
+        fi
+        [[ -f "$merges_file" ]] || "$PYTHON" - "$merges_file" <<'PY'
+import json, sys
+with open(sys.argv[1], "w") as stream:
+    json.dump({"version": 1, "merges": []}, stream, indent=2)
+    stream.write("\n")
+PY
+        discovery_args=(--monomer-aliases-json "$aliases_file" --monomer-merges-json "$merges_file")
         run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}"
+
+        while ask_yes_no "Merge connected inferred monomer types into a larger monomer?" n; do
+            mapfile -t MERGE_ENTRIES < <("$PYTHON" - "$discovery" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream: data = json.load(stream)
+charges = data.get("inferred_charges", {})
+for name in data.get("candidate_nmers", {}).get("1", []):
+    print(f"[suggested charge {charges.get(name, 'review')}] {name}")
+PY
+            )
+            choose_numbered_entries "Choose at least two connected monomer types to merge:" "${MERGE_ENTRIES[@]}" || return 1
+            if [[ "$SELECT_ALL" == true ]]; then
+                SELECTED_NMER_NAMES=()
+                for answer in "${MERGE_ENTRIES[@]}"; do SELECTED_NMER_NAMES+=("${answer#*] }"); done
+            fi
+            ((${#SELECTED_NMER_NAMES[@]} >= 2)) || { echo "A merge requires at least two distinct monomer types." >&2; continue; }
+            while true; do
+                merge_name=$(ask_default "Name for the merged monomer" "")
+                [[ "$merge_name" =~ ^[A-Za-z0-9_+-]+$ ]] && break
+                echo "Use only letters, numbers, '_', '+', and '-' in monomer names." >&2
+            done
+            MERGE_MEMBERS=$(printf '%s\n' "${SELECTED_NMER_NAMES[@]}") MERGE_NAME="$merge_name" "$PYTHON" - "$merges_file" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path))
+members = list(dict.fromkeys(os.environ["MERGE_MEMBERS"].splitlines()))
+name = os.environ["MERGE_NAME"]
+if any(entry["name"] == name for entry in data.get("merges", [])):
+    raise SystemExit(f"A merge named {name!r} already exists.")
+data.setdefault("merges", []).append({"name": name, "members": members})
+with open(path, "w") as stream:
+    json.dump(data, stream, indent=2)
+    stream.write("\n")
+PY
+            run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode" --max-order "$max_order" "${discovery_args[@]}"
+        done
+
+        mapfile -t CHARGE_ENTRIES < <("$PYTHON" - "$discovery" "$charges_file" <<'PY'
+import json, os, sys
+with open(sys.argv[1]) as stream: data = json.load(stream)
+confirmed = json.load(open(sys.argv[2])) if os.path.isfile(sys.argv[2]) else {}
+inferred = data.get("inferred_charges", {})
+for name in data.get("candidate_nmers", {}).get("1", []):
+    suggestion = inferred.get(name, 0)
+    current = confirmed.get(name, suggestion)
+    print(f"{name}\t{suggestion}\t{current}")
+PY
+        )
+        echo "Suggested monomer charges from full-topology bond-order sums:"
+        for answer in "${CHARGE_ENTRIES[@]}"; do
+            IFS=$'\t' read -r raw_name inferred_charge current_charge <<<"$answer"
+            printf '  %-45s suggested=%s  selected=%s\n' "$raw_name" "$inferred_charge" "$current_charge"
+        done
+        CHARGE_PAIRS=""
+        if ask_yes_no "Accept the selected charges shown above?" y; then
+            for answer in "${CHARGE_ENTRIES[@]}"; do
+                IFS=$'\t' read -r raw_name inferred_charge current_charge <<<"$answer"
+                CHARGE_PAIRS+="$raw_name"$'\t'"$current_charge"$'\n'
+            done
+        else
+            for answer in "${CHARGE_ENTRIES[@]}"; do
+                IFS=$'\t' read -r raw_name inferred_charge current_charge <<<"$answer"
+                while true; do
+                    requested_name=$(ask_default "Integer charge for '$raw_name' (auto suggestion: $inferred_charge)" "$current_charge")
+                    [[ "$requested_name" =~ ^-?[0-9]+$ ]] && break
+                    echo "Enter an integer charge." >&2
+                done
+                CHARGE_PAIRS+="$raw_name"$'\t'"$requested_name"$'\n'
+            done
+        fi
+        CHARGE_PAIRS="$CHARGE_PAIRS" "$PYTHON" - "$charges_file" <<'PY'
+import json, os, sys
+charges = {}
+for line in os.environ.get("CHARGE_PAIRS", "").splitlines():
+    name, charge = line.split("\t", 1)
+    charges[name] = int(charge)
+with open(sys.argv[1], "w") as stream:
+    json.dump(charges, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
     fi
-    record_stage_metadata discover_monomers "$(json_parameters monomer_mode="$monomer_mode" bond_order_mode="$bond_order_mode" max_order="$max_order")" "$TRAJ_DATASET" "$discovery|$aliases_file" "discover and name monomers"
+    record_stage_metadata discover_monomers "$(json_parameters monomer_mode="$monomer_mode" bond_order_mode="$bond_order_mode" max_order="$max_order")" "$TRAJ_DATASET" "$discovery|$aliases_file|$merges_file|$charges_file" "discover, merge, name, and assign charges to monomers"
 }
 
 stage_build_xyz() {
-    local order_line sample_count sample_default sample_method workers max_order monomer_mode bond_order_mode aliases_file discovery current_target selection order missing_aliases
+    local order_line sample_count sample_default sample_method workers max_order monomer_mode bond_order_mode aliases_file merges_file discovery current_target selection order missing_aliases
     local -a sampling_specs=() build_args=()
     require_file "$TRAJ_DATASET" || return 1
     order_line=$(ask_default "N-mer orders to build" "1 2 3"); max_order=$(tr ' ' '\n' <<<"$order_line" | sort -n | tail -1)
     monomer_mode=$(ask_default "Monomer discovery mode (auto or legacy)" auto); bond_order_mode=$(ask_default "Bond-order mode (auto, topology, or geometry)" auto)
-    aliases_file="$DATASET_ROOT/metadata/monomer_aliases.json"; discovery="$DATASET_ROOT/data/monomer_discovery.json"
+    aliases_file="$DATASET_ROOT/metadata/monomer_aliases.json"; merges_file="$DATASET_ROOT/metadata/monomer_merges.json"; discovery="$DATASET_ROOT/data/monomer_discovery.json"
     build_args=(--monomer-mode "$monomer_mode" --bond-order-mode "$bond_order_mode")
     [[ ! -f "$aliases_file" || "$monomer_mode" != auto ]] || build_args+=(--monomer-aliases-json "$aliases_file")
+    [[ ! -f "$merges_file" || ! -f "$aliases_file" || "$monomer_mode" != auto ]] || build_args+=(--monomer-merges-json "$merges_file")
     run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --max-order "$max_order" "${build_args[@]}"
     if [[ "$monomer_mode" == auto ]]; then
         missing_aliases=$("$PYTHON" - "$discovery" "$aliases_file" <<'PY'
@@ -307,6 +405,7 @@ PY
             stage_discover_monomers || return 1
             require_file "$aliases_file" || { echo "Automatic builds require naming decisions from operation 2." >&2; return 1; }
             build_args=(--monomer-mode auto --bond-order-mode "$bond_order_mode" --monomer-aliases-json "$aliases_file")
+            [[ ! -f "$merges_file" ]] || build_args+=(--monomer-merges-json "$merges_file")
             run_logged discover_monomers "$PYTHON" -m dataforge.scripts.build_nmers discover --input "$TRAJ_DATASET" --root "$DATASET_ROOT" --max-order "$max_order" "${build_args[@]}"
         fi
     fi
@@ -329,14 +428,19 @@ stage_initial_cap() {
 }
 
 charge_args() {
-    local charges_json
-    CHARGE_ARGS=(); charges_json=$(ask_default "Optional monomer-charge JSON (empty uses built-in charges)" "")
-    [[ -z "$charges_json" ]] || CHARGE_ARGS=(--charges-json "$charges_json")
+    local charges_json default_charges=""
+    CHARGE_ARGS=()
+    [[ ! -f "$DATASET_ROOT/metadata/monomer_charges.json" ]] || default_charges="$DATASET_ROOT/metadata/monomer_charges.json"
+    charges_json=$(ask_default "Monomer-charge JSON ('builtin' uses package defaults)" "$default_charges")
+    [[ "$charges_json" == builtin || -z "$charges_json" ]] || {
+        require_file "$charges_json" || return 1
+        CHARGE_ARGS=(--charges-json "$charges_json")
+    }
 }
 
 stage_prepare_minimization() {
     local workers selection
-    select_nmers_from_root "$INITIAL_CAPPED" h5 "Capped n-mer types available for minimization input preparation:" || return 1; nmer_cli_args; charge_args
+    select_nmers_from_root "$INITIAL_CAPPED" h5 "Capped n-mer types available for minimization input preparation:" || return 1; nmer_cli_args; charge_args || return 1
     workers=$(ask_default "Input-preparation worker processes" 4); selection=$(selection_summary)
     run_logged prepare_qchem_minimized "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$INITIAL_CAPPED" --qchem-min-in-root "$INITIAL_QCHEM_MIN_IN" --qchem-mode minimization --max-processes "$workers" "${CHARGE_ARGS[@]}" "${NMER_ARGS[@]}"
     record_stage_metadata prepare_qchem_minimized "$(json_parameters workers="$workers" selection="$selection")" "$INITIAL_CAPPED" "$INITIAL_QCHEM_MIN_IN" "prepare selected minimization inputs"
@@ -367,7 +471,7 @@ stage_apply_distances() {
 
 stage_prepare_final() {
     local workers selection
-    select_nmers_from_root "$CORRECTED_CAPPED" h5 "Corrected n-mer types available for single-point input preparation:" || return 1; nmer_cli_args; charge_args
+    select_nmers_from_root "$CORRECTED_CAPPED" h5 "Corrected n-mer types available for single-point input preparation:" || return 1; nmer_cli_args; charge_args || return 1
     workers=$(ask_default "Input-preparation worker processes" 4); selection=$(selection_summary)
     run_logged prepare_qchem_final "$PYTHON" -m dataforge.scripts.build_nmers prepare_qchem --root "$DATASET_ROOT" --nmers-capped-root "$CORRECTED_CAPPED" --qchem-in-root "$FINAL_QCHEM_IN" --qchem-mode full --max-processes "$workers" "${CHARGE_ARGS[@]}" "${NMER_ARGS[@]}"
     record_stage_metadata prepare_qchem_final "$(json_parameters workers="$workers" selection="$selection")" "$CORRECTED_CAPPED" "$FINAL_QCHEM_IN" "prepare selected single-point inputs"
